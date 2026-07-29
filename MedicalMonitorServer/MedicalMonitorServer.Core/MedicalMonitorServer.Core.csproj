@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MedicalMonitorServer.Contracts\MedicalMonitorServer.Contracts.csproj" />
+    <ProjectReference Include="..\MedicalMonitorServer.Dal\MedicalMonitorServer.Dal.csproj" />
+    <ProjectReference Include="..\MedicalMonitorServer.DeviceDriver\MedicalMonitorServer.DeviceDriver.csproj" />
+  </ItemGroup>
+
+</Project>

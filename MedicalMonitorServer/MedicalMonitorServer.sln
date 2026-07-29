@@ -1,0 +1,55 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.37012.4 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MedicalMonitorServer", "MedicalMonitorServer\MedicalMonitorServer.csproj", "{2A7D8F98-2189-4795-8E40-20C7D3AF836D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MedicalMonitorServer.Core", "MedicalMonitorServer.Core\MedicalMonitorServer.Core.csproj", "{63302CB8-B57D-44D9-8BEB-B5ECF32658DF}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MedicalMonitorServer.Dal", "MedicalMonitorServer.Dal\MedicalMonitorServer.Dal.csproj", "{94AA3CB2-20BC-4768-80C8-6559F8D9F5BF}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MedicalMonitorServer.Contracts", "MedicalMonitorServer.Contracts\MedicalMonitorServer.Contracts.csproj", "{753DCDDF-DFC7-48F1-A1D0-A520ACB61347}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MedicalMonitorServer.DeviceDriver", "MedicalMonitorServer.DeviceDriver\MedicalMonitorServer.DeviceDriver.csproj", "{BA9E8BA9-01D5-4F68-AB68-E064D8339C32}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MedicalMonitorServer.ConsoleApp", "MedicalMonitorServer.ConsoleApp\MedicalMonitorServer.ConsoleApp.csproj", "{BA7CB197-C7AD-4515-9126-6B30C6A6E788}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{2A7D8F98-2189-4795-8E40-20C7D3AF836D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2A7D8F98-2189-4795-8E40-20C7D3AF836D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2A7D8F98-2189-4795-8E40-20C7D3AF836D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2A7D8F98-2189-4795-8E40-20C7D3AF836D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{63302CB8-B57D-44D9-8BEB-B5ECF32658DF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{63302CB8-B57D-44D9-8BEB-B5ECF32658DF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{63302CB8-B57D-44D9-8BEB-B5ECF32658DF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{63302CB8-B57D-44D9-8BEB-B5ECF32658DF}.Release|Any CPU.Build.0 = Release|Any CPU
+		{94AA3CB2-20BC-4768-80C8-6559F8D9F5BF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{94AA3CB2-20BC-4768-80C8-6559F8D9F5BF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{94AA3CB2-20BC-4768-80C8-6559F8D9F5BF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{94AA3CB2-20BC-4768-80C8-6559F8D9F5BF}.Release|Any CPU.Build.0 = Release|Any CPU
+		{753DCDDF-DFC7-48F1-A1D0-A520ACB61347}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{753DCDDF-DFC7-48F1-A1D0-A520ACB61347}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{753DCDDF-DFC7-48F1-A1D0-A520ACB61347}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{753DCDDF-DFC7-48F1-A1D0-A520ACB61347}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BA9E8BA9-01D5-4F68-AB68-E064D8339C32}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BA9E8BA9-01D5-4F68-AB68-E064D8339C32}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BA9E8BA9-01D5-4F68-AB68-E064D8339C32}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BA9E8BA9-01D5-4F68-AB68-E064D8339C32}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BA7CB197-C7AD-4515-9126-6B30C6A6E788}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BA7CB197-C7AD-4515-9126-6B30C6A6E788}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BA7CB197-C7AD-4515-9126-6B30C6A6E788}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BA7CB197-C7AD-4515-9126-6B30C6A6E788}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {7548D370-21F5-4477-8FF8-C42AEA80127C}
+	EndGlobalSection
+EndGlobal
