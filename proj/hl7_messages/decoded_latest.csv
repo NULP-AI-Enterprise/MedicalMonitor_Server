@@ -1,0 +1,10 @@
+param_id,parameter,measured,low_limit,high_limit,alarm_level,unit
+101,Heart Rate (HR),,63,120,med,bpm
+102,PVCs,,0,10,low,/min
+106,ST-II,,-0.20,0.20,low,mV
+120,param 120,,0,500,low,
+123,param 123,,0,60,low,
+151,Respiration Rate (RR),,8,30,low,rpm
+170,NIBP Systolic,,90,160,low,mmHg
+171,NIBP Diastolic,,50,90,low,mmHg
+172,NIBP Mean,,60,110,low,mmHg

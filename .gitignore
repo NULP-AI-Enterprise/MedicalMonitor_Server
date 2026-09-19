@@ -427,3 +427,9 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# uMec10 tools (proj/): compiled C++ logger and macOS folder metadata
+proj/read
+.DS_Store
+# keep the captured HL7 samples used as test fixtures (the VS template ignores *.log)
+!proj/hl7_messages/*.log

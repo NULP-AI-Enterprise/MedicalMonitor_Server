@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>UmecDecode</RootNamespace>
+    <!-- same command-line name as decode.py (./decode, not ./UmecDecode) -->
+    <AssemblyName>decode</AssemblyName>
+    <!-- no ICU needed: all formatting here is culture-independent -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>
