@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: patient-monitoring-db
+    environment:
+      POSTGRES_DB: patientmonitoring
+      POSTGRES_USER: pm_user
+      POSTGRES_PASSWORD: pm_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pm_user -d patientmonitoring"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: src/PatientMonitoring.Api/Dockerfile
+    container_name: patient-monitoring-api
+    ports:
+      - "5225:5225"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__Default=Host=postgres;Port=5432;Database=patientmonitoring;Username=pm_user;Password=pm_password;Pooling=true;CommandTimeout=30;
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
