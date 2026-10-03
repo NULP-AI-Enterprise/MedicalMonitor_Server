@@ -64,21 +64,45 @@ public class ParserService : IParserService
             Raw = message.Trim(VT, FS, '\r', '\n', '\0'),
         };
 
+        bool isAdt = msg.MessageType.StartsWith("ADT", StringComparison.Ordinal);
+
+        var oru = isAdt ? null : new UmecVitalsMessage();
+        var adt = isAdt ? new DeviceAdtInfo() : null;
+
         var pid = segments.FirstOrDefault(s => s.Name == "PID");
         var pv1 = segments.FirstOrDefault(s => s.Name == "PV1");
         var evn = segments.FirstOrDefault(s => s.Name == "EVN");
-        if (pid != null || pv1 != null) msg.Patient = ParsePatient(pid, pv1);
-        if (evn != null) (msg.Patient ??= new PatientInfo()).AdmitDate = ParseDate(evn[2]);
+
+        PatientInfo? patient = null;
+        if (pid != null || pv1 != null) patient = ParsePatient(pid, pv1);
+        if (evn != null) (patient ??= new PatientInfo()).AdmitDate = ParseDate(evn[2]);
+
+        if (isAdt)
+            adt!.Patient = patient;
+        else
+            oru!.Patient = patient;
 
         var settings = new Dictionary<int, AlarmSetting>();
         foreach (var seg in segments.Where(s => s.Name == "OBX"))
         {
             var o = ToObservation(seg);
-            msg.Observations.Add(o);
-            Apply(msg, o, settings);
+            if (isAdt)
+            {
+                adt!.Observations.Add(o);
+                ApplyAdt(adt, o);
+            }
+            else
+            {
+                oru!.Observations.Add(o);
+                ApplyOru(oru, o, settings);
+            }
         }
-        msg.AlarmSettings.AddRange(settings.Values);
 
+        if (oru != null)
+            oru.AlarmSettings.AddRange(settings.Values);
+
+        msg.Oru = oru;
+        msg.Adt = adt;
         msg.Kind = KindOf(msg);
         return msg;
     }
@@ -109,21 +133,21 @@ public class ParserService : IParserService
         };
     }
 
-    private static void Apply(UmecMessage msg, UmecObservation o, Dictionary<int, AlarmSetting> settings)
+    private static void ApplyOru(UmecVitalsMessage oru, UmecObservation o, Dictionary<int, AlarmSetting> settings)
     {
         switch (o.Code)
         {
             // ---- parameter naming (ORU msg 11) ------------------------------
             case "2025":                        // "<pid>^<label>", OBX-4 = group
                 if (ParseInt(o.ValueCode) is int lp)
-                    msg.ParameterLabels.Add(new ParameterLabel
+                    oru.ParameterLabels.Add(new ParameterLabel
                     {
                         ParameterId = lp, Label = o.ValueText, GroupId = ParseInt(o.SubId),
                     });
                 break;
             case "2023":                        // "<group>^<label>"
                 if (ParseInt(o.ValueCode) is int g)
-                    msg.ParameterGroups.Add(new ParameterGroup { GroupId = g, Label = o.ValueText });
+                    oru.ParameterGroups.Add(new ParameterGroup { GroupId = g, Label = o.ValueText });
                 break;
 
             // ---- alarm setup per parameter, OBX-4 = parameter id (ORU msg 51/58/60)
@@ -145,7 +169,51 @@ public class ParserService : IParserService
             case "2028": AlarmSystem().SoundPaused = ParseFlag(o.ValueCode); break;
             case "2016": AlarmSystem().AlarmPaused = ParseFlag(o.ValueCode); break;
 
-            // ---- patient attributes (ORU msg 103, ADT beacon) ---------------
+            // ---- patient attributes (ORU msg 103) ---------------------------
+            case "51": Patient().WeightKg = ParseNumber(o.Value); break;
+            case "52": Patient().HeightCm = ParseNumber(o.Value); break;
+            case "2301": Patient().BedNumber = o.Value; break;
+            case "2302": Patient().BloodType = o.ValueText; break;
+            case "2303": Patient().Paced = ParseFlag(o.ValueCode); break;
+            case "2308": Patient().BedLabel = o.Value; break;
+
+            // ---- active alarms (ORU msg 54/56): OBX-3 = type, OBX-4 = level, OBX-5 = "<id>^<text>"
+            case "1" or "2" or "3" or "4" when o.ValueType == "CE":
+                oru.Alarms.Add(ToAlarm(o));
+                break;
+
+            // ---- measurements: numeric parameter ids below 1000 (ORU msg 503)
+            default:
+                if (o.ValueType == "NM" && ParseInt(o.Code) is int p && p < 1000)
+                    oru.Vitals.Add(ToVital(o, p));
+                break;
+        }
+
+        AlarmSetting? Setting(UmecObservation obs)
+        {
+            if (ParseInt(obs.SubId) is not int p) return null;
+            if (!settings.TryGetValue(p, out var s))
+            {
+                s = new AlarmSetting
+                {
+                    ParameterId = p,
+                    ParameterName = NameOf(p, ""),
+                    Unit = Parameters.TryGetValue(p, out var d) ? d.Unit : "",
+                };
+                settings[p] = s;
+            }
+            return s;
+        }
+
+        AlarmSystemStatus AlarmSystem() => oru.AlarmSystem ??= new AlarmSystemStatus();
+        PatientInfo Patient() => oru.Patient ??= new PatientInfo();
+    }
+
+    private static void ApplyAdt(DeviceAdtInfo adt, UmecObservation o)
+    {
+        switch (o.Code)
+        {
+            // ---- patient attributes (ADT beacon) ----------------------------
             case "51": Patient().WeightKg = ParseNumber(o.Value); break;
             case "52": Patient().HeightCm = ParseNumber(o.Value); break;
             case "2301": Patient().BedNumber = o.Value; break;
@@ -166,38 +234,10 @@ public class ParserService : IParserService
             case "4529": Monitor().MachineVersion = TextOf(o); break;
             case "2319": Monitor().ViewBedDeviceId = TextOf(o); break;
             case "2320": Monitor().ViewBedIdLength = ParseInt(o.ValueCode); break;
-
-            // ---- active alarms (ORU msg 54/56): OBX-3 = type, OBX-4 = level, OBX-5 = "<id>^<text>"
-            case "1" or "2" or "3" or "4" when o.ValueType == "CE":
-                msg.Alarms.Add(ToAlarm(o));
-                break;
-
-            // ---- measurements: numeric parameter ids below 1000 (ORU msg 503)
-            default:
-                if (o.ValueType == "NM" && ParseInt(o.Code) is int p && p < 1000)
-                    msg.Vitals.Add(ToVital(o, p));
-                break;
         }
 
-        AlarmSetting? Setting(UmecObservation obs)
-        {
-            if (ParseInt(obs.SubId) is not int p) return null;
-            if (!settings.TryGetValue(p, out var s))
-            {
-                s = new AlarmSetting
-                {
-                    ParameterId = p,
-                    ParameterName = NameOf(p, ""),
-                    Unit = Parameters.TryGetValue(p, out var d) ? d.Unit : "",
-                };
-                settings[p] = s;
-            }
-            return s;
-        }
-
-        AlarmSystemStatus AlarmSystem() => msg.AlarmSystem ??= new AlarmSystemStatus();
-        PatientInfo Patient() => msg.Patient ??= new PatientInfo();
-        MonitorInfo Monitor() => msg.Monitor ??= new MonitorInfo();
+        PatientInfo Patient() => adt.Patient ??= new PatientInfo();
+        MonitorInfo Monitor() => adt.Monitor ??= new MonitorInfo();
     }
 
     private static VitalSign ToVital(UmecObservation o, int pid) => new()
@@ -289,23 +329,26 @@ public class ParserService : IParserService
             return m.MessageType == "ADT^A01" ? UmecMessageKind.MonitorStatus : UmecMessageKind.AdtEvent;
         if (MessageKinds.TryGetValue(m.MessageId, out var kind)) return kind;
 
-        // unknown message id: go by what it carries
-        if (m.Vitals.Count > 0) return UmecMessageKind.Vitals;
-        if (m.Patient != null) return UmecMessageKind.PatientInfo;
-        if (m.Alarms.Count > 0)
-            return m.Alarms[0].Category == AlarmCategory.Technical
+        // unknown message id: go by what the ORU payload carries
+        var oru = m.Oru;
+        if (oru == null) return UmecMessageKind.Unknown;
+
+        if (oru.Vitals.Count > 0) return UmecMessageKind.Vitals;
+        if (oru.Patient != null) return UmecMessageKind.PatientInfo;
+        if (oru.Alarms.Count > 0)
+            return oru.Alarms[0].Category == AlarmCategory.Technical
                 ? UmecMessageKind.TechnicalAlarms
                 : UmecMessageKind.PhysiologicalAlarms;
-        if (m.AlarmSettings.Count > 0)
+        if (oru.AlarmSettings.Count > 0)
         {
-            var s = m.AlarmSettings[0];
+            var s = oru.AlarmSettings[0];
             if (s.HighLimit != null || s.LowLimit != null) return UmecMessageKind.AlarmLimits;
             if (s.Enabled != null) return UmecMessageKind.AlarmSwitches;
             if (s.LevelCode != null) return UmecMessageKind.AlarmLevels;
         }
-        if (m.ParameterLabels.Count > 0 || m.ParameterGroups.Count > 0) return UmecMessageKind.ParameterLabels;
-        if (m.AlarmSystem != null) return UmecMessageKind.AlarmSystemStatus;
-        if (m.Observations.Count > 0) return UmecMessageKind.Settings;
+        if (oru.ParameterLabels.Count > 0 || oru.ParameterGroups.Count > 0) return UmecMessageKind.ParameterLabels;
+        if (oru.AlarmSystem != null) return UmecMessageKind.AlarmSystemStatus;
+        if (oru.Observations.Count > 0) return UmecMessageKind.Settings;
         return UmecMessageKind.Unknown;
     }
 
