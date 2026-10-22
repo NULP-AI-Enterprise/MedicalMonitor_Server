@@ -73,7 +73,12 @@ public class WatchDogService : IWatchDogService
 
     private async Task<DeviceState> CheckDeviceAsync(string ip, CancellationToken cancellationToken)
     {
-        var state = new DeviceState { IpAddress = ip, State = DeviceStateEnum.Disconnected };
+        var state = new DeviceState
+        {
+            IpAddress = ip,
+            Port = _port.ToString(),
+            State = DeviceStateEnum.Disconnected
+        };
 
         if (!IPAddress.TryParse(ip, out IPAddress? parsedIp))
         {

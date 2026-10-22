@@ -28,7 +28,6 @@ public interface IComunicationService
         Func<byte[], IPEndPoint, CancellationToken, Task> onDatagramReceived,
         CancellationToken cancellationToken = default);
 }
-
 public class ComunicationService : IComunicationService
 {
     private const byte VT = 0x0B;   // MLLP start block
@@ -146,4 +145,3 @@ public class ComunicationService : IComunicationService
         await Task.WhenAll(tasks);
     }
 }
-
