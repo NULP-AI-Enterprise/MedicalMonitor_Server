@@ -57,9 +57,19 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
 
     private void OnMessage(UmecMessage message)
     {
-        if (message.Patient is not null && !string.IsNullOrWhiteSpace(message.Patient.PatientId))
+        var patient = message.Oru?.Patient ?? message.Adt?.Patient;
+        if (patient is not null && !string.IsNullOrWhiteSpace(patient.PatientId))
         {
-            _patients[message.Patient.PatientId] = message.Patient;
+            _patients[patient.PatientId] = new PatientData
+            {
+                PatientId = patient.PatientId,
+                Name = patient.FullName,
+                Values = new Dictionary<string, string>
+                {
+                    ["bedNumber"] = patient.BedNumber,
+                    ["department"] = patient.Department,
+                },
+            };
         }
 
         OnMessageReceived?.Invoke(message);
@@ -87,9 +97,8 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
         {
             State = state;
             _port = port;
-            _parserService = new ParserService(state);
+            _parserService = new ParserService();
             _messageReceived = messageReceived;
-            _communicationService.DataReceived += Parse;
         }
 
         public DeviceState State { get; }
@@ -103,9 +112,10 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
         {
             try
             {
-                await _communicationService.ConnectAsync(
+                await _communicationService.ReadTcpStreamAsync(
                     State.IpAddress,
                     _port,
+                    Parse,
                     _cancellationTokenSource.Token);
             }
             catch (OperationCanceledException) when (_cancellationTokenSource.IsCancellationRequested)
@@ -113,9 +123,10 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
             }
         }
 
-        private Task Parse(ReadOnlyMemory<byte> data)
+        private Task Parse(byte[] data, CancellationToken cancellationToken)
         {
-            foreach (var message in _parserService.Parse(data.Span))
+            var message = _parserService.Parse(data);
+            if (message is not null)
             {
                 _messageReceived(message);
             }
@@ -126,7 +137,6 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
         public void Dispose()
         {
             _cancellationTokenSource.Cancel();
-            _communicationService.DisposeAsync().AsTask().GetAwaiter().GetResult();
             _cancellationTokenSource.Dispose();
         }
     }
