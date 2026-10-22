@@ -7,7 +7,7 @@ namespace MedicalMonitorServer.DeviceDriver.Umec;
 public sealed class UmecDeviceDataProvider : IDeviceDataProvider
 {
     private readonly ConcurrentDictionary<string, MonitorConnection> _connections = new();
-    private readonly ConcurrentDictionary<string, PatientData> _patients = new();
+    private readonly ConcurrentDictionary<string, PatientInfo> _patients = new();
 
     public event Action<IDeviceDataProvider, DeviceState>? OnDeviceConnected;
 
@@ -16,7 +16,7 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
     public IReadOnlyCollection<DeviceState> ConnectedDevices =>
         _connections.Values.Select(connection => connection.State).ToArray();
 
-    public IReadOnlyCollection<PatientData> Patients => _patients.Values.ToArray();
+    public IReadOnlyCollection<PatientInfo> Patients => _patients.Values.ToArray();
 
     public void Connect(DeviceState deviceState)
     {
@@ -60,16 +60,7 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
         var patient = message.Oru?.Patient ?? message.Adt?.Patient;
         if (patient is not null && !string.IsNullOrWhiteSpace(patient.PatientId))
         {
-            _patients[patient.PatientId] = new PatientData
-            {
-                PatientId = patient.PatientId,
-                Name = patient.FullName,
-                Values = new Dictionary<string, string>
-                {
-                    ["bedNumber"] = patient.BedNumber,
-                    ["department"] = patient.Department,
-                },
-            };
+            _patients[patient.PatientId] = patient;
         }
 
         OnMessageReceived?.Invoke(message);

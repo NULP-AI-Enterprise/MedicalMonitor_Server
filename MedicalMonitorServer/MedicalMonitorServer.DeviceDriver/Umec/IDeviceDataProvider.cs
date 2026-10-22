@@ -10,7 +10,7 @@ public interface IDeviceDataProvider : IDisposable
 
     IReadOnlyCollection<DeviceState> ConnectedDevices { get; }
 
-    IReadOnlyCollection<PatientData> Patients { get; }
+    IReadOnlyCollection<PatientInfo> Patients { get; }
 
     void Connect(DeviceState deviceState);
 
