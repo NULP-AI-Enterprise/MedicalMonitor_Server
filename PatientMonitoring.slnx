@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PatientMonitoring.Api/PatientMonitoring.Api.csproj" />
+    <Project Path="MedicalMonitor_Desktop/src/Monitoring.Shared/Monitoring.Shared.csproj" />
+    <Project Path="MedicalMonitor_Desktop/src/Monitoring.BL/Monitoring.BL.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PatientMonitoring.UnitTests/PatientMonitoring.UnitTests.csproj" />
+    <Project Path="tests/PatientMonitoring.IntegrationTests/PatientMonitoring.IntegrationTests.csproj" />
+  </Folder>
+  <Folder Name="/MedicalMonitorServer/">
+    <Project Path="MedicalMonitorServer/MedicalMonitorServer.Contracts/MedicalMonitorServer.Contracts.csproj" />
+    <Project Path="MedicalMonitorServer/MedicalMonitorServer.DeviceDriver/MedicalMonitorServer.DeviceDriver.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,3 @@
+[submodule "MedicalMonitor_Desktop"]
+	path = MedicalMonitor_Desktop
+	url = https://github.com/NULP-AI-Enterprise/MedicalMonitor_Desktop.git

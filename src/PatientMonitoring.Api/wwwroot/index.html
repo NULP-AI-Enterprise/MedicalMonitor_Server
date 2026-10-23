@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏥 Моніторинг пацієнтів у реальному часі</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/10.0.0/signalr.min.js"></script>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body {
+            margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #f1f5f9; color: #1e293b; line-height: 1.5;
+        }
+        header {
+            background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
+            color: #fff; padding: 16px 24px;
+            display: flex; align-items: center; justify-content: space-between;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+        }
+        header h1 { margin: 0; font-size: 1.3rem; display: flex; align-items: center; gap: 8px; }
+        .header-actions { display: flex; align-items: center; gap: 12px; }
+        .container { max-width: 1200px; margin: 24px auto; padding: 0 16px; }
+        
+        .stats-bar {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px; margin-bottom: 20px;
+        }
+        .stat-card {
+            background: #fff; border-radius: 10px; padding: 12px 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,.06); cursor: pointer;
+            border-left: 4px solid #cbd5e1; transition: transform .1s, box-shadow .1s;
+        }
+        .stat-card:hover { transform: translateY(-2px); box-shadow: 0 4px 6px rgba(0,0,0,.08); }
+        .stat-card.active { outline: 2px solid #2563eb; }
+        .stat-card.stat-all { border-color: #64748b; }
+        .stat-card.stat-critical { border-color: #ef4444; }
+        .stat-card.stat-warning { border-color: #f59e0b; }
+        .stat-card.stat-normal { border-color: #10b981; }
+        .stat-title { font-size: 0.8rem; color: #64748b; text-transform: uppercase; font-weight: 600; }
+        .stat-value { font-size: 1.4rem; font-weight: 700; color: #0f172a; margin-top: 2px; }
+
+        .toolbar {
+            display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; align-items: center;
+        }
+        .search-box {
+            flex: 1; min-width: 250px; position: relative;
+        }
+        .search-box input {
+            width: 100%; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: .9rem;
+            outline: none; transition: border-color .15s;
+        }
+        .search-box input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.2); }
+
+        .grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px;
+        }
+        .card {
+            background: #fff; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,.05);
+            padding: 18px; transition: transform .15s, box-shadow .15s;
+            display: flex; flex-direction: column; justify-content: space-between;
+            border-left: 5px solid #10b981;
+        }
+        .card:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,.1); }
+        .card.card-warning { border-left-color: #f59e0b; }
+        .card.card-critical { border-left-color: #ef4444; background: #fffdfd; }
+        
+        .card-header {
+            display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px;
+        }
+        .card h2 { margin: 0; font-size: 1.05rem; color: #1e293b; display: flex; align-items: center; gap: 6px; }
+        
+        .badge {
+            display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px;
+            font-size: .75rem; font-weight: 600; color: #fff; text-transform: uppercase;
+        }
+        .badge-normal { background: #10b981; }
+        .badge-warning { background: #f59e0b; }
+        .badge-critical { background: #ef4444; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+        
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .dot-normal { background: #10b981; }
+        .dot-warning { background: #f59e0b; }
+        .dot-critical { background: #ef4444; }
+
+        .patient-meta {
+            font-size: .8rem; color: #64748b; margin-bottom: 12px;
+            display: flex; flex-wrap: wrap; gap: 8px;
+        }
+        .patient-meta span { background: #f8fafc; padding: 2px 6px; border-radius: 4px; border: 1px solid #e2e8f0; }
+
+        .vitals-grid {
+            display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 12px 0;
+            background: #f8fafc; padding: 10px; border-radius: 8px; font-size: .85rem;
+        }
+        .vital-item { display: flex; flex-direction: column; }
+        .vital-label { font-size: .75rem; color: #64748b; }
+        .vital-value { font-weight: 600; color: #0f172a; }
+        .vital-time { font-size: .75rem; color: #94a3b8; margin-top: 4px; grid-column: span 2; }
+
+        .alerts {
+            margin-top: 10px; padding: 8px 10px; border-radius: 6px;
+            font-size: .8rem; background: #fef2f2; border: 1px solid #fee2e2; color: #b91c1c;
+        }
+        .alerts-warning { background: #fffbeb; border-color: #fef3c7; color: #b45309; }
+
+        .card-actions {
+            margin-top: 14px; padding-top: 12px; border-top: 1px solid #f1f5f9;
+            display: flex; justify-content: flex-end; gap: 8px;
+        }
+        .btn-outline-danger {
+            background: transparent; border: 1px solid #fca5a5; color: #dc2626;
+            padding: 4px 10px; font-size: .78rem; border-radius: 6px; cursor: pointer;
+        }
+        .btn-outline-danger:hover { background: #fef2f2; border-color: #ef4444; }
+        .btn-outline-primary {
+            background: transparent; border: 1px solid #93c5fd; color: #2563eb;
+            padding: 4px 10px; font-size: .78rem; border-radius: 6px; cursor: pointer; text-decoration: none;
+        }
+        .btn-outline-primary:hover { background: #eff6ff; border-color: #3b82f6; }
+
+        .empty { text-align: center; color: #94a3b8; font-style: italic; padding: 40px 16px; }
+
+        .forms-wrapper {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 16px; margin-top: 24px;
+        }
+        .form {
+            background: #fff; padding: 18px; border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,.06);
+        }
+        .form h3 { margin: 0 0 12px; font-size: 1rem; color: #1e293b; display: flex; align-items: center; gap: 6px; }
+        .form-row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+        .form-row input, .form-row select {
+            flex: 1; min-width: 100px; padding: 7px 10px;
+            border: 1px solid #cbd5e1; border-radius: 6px; font-size: .88rem; outline: none;
+        }
+        .form-row input:focus, .form-row select:focus {
+            border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.15);
+        }
+        .presets {
+            display: flex; gap: 6px; margin: 10px 0; flex-wrap: wrap;
+        }
+        .btn-preset {
+            padding: 4px 8px; font-size: .75rem; border-radius: 6px;
+            border: 1px solid #cbd5e1; background: #f8fafc; cursor: pointer; color: #334155;
+        }
+        .btn-preset:hover { background: #e2e8f0; }
+
+        button.btn-primary {
+            width: 100%; padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer;
+            background: #1e3a5f; color: #fff; font-size: .9rem; font-weight: 500; transition: background .15s;
+        }
+        button.btn-primary:hover { background: #2b5182; }
+
+        #log-container {
+            margin-top: 24px; background: #0f172a; color: #cbd5e1;
+            border-radius: 10px; padding: 14px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .log-header {
+            display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
+            border-bottom: 1px solid #1e293b; padding-bottom: 6px; font-size: .85rem; font-weight: 600; color: #94a3b8;
+        }
+        #log {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: .8rem; max-height: 180px; overflow-y: auto; display: flex; flex-direction: column-reverse;
+        }
+        #log div { margin: 2px 0; line-height: 1.4; }
+        #log .info { color: #93c5fd; }
+        #log .warn { color: #fbbf24; }
+        #log .err { color: #f87171; font-weight: 600; }
+        #log .success { color: #86efac; }
+    </style>
+</head>
+<body>
+<header>
+    <h1>🏥 Моніторинг пацієнтів у реальному часі</h1>
+    <div class="header-actions">
+        <a href="/scalar/v1" target="_blank" style="color:#93c5fd; text-decoration:none; font-size:0.85rem; font-weight:500;">📖 Scalar API Docs</a>
+        <div id="health-status" class="badge badge-normal" title="Перевірка стану системи">💚 БД: OK</div>
+        <div id="connection-status" class="badge badge-warning">● Підключення...</div>
+    </div>
+</header>
+
+<main class="container">
+    <div class="stats-bar">
+        <div class="stat-card stat-all active" onclick="setFilter('all')">
+            <div class="stat-title">Всі пацієнти</div>
+            <div class="stat-value" id="count-all">0</div>
+        </div>
+        <div class="stat-card stat-critical" onclick="setFilter('Critical')">
+            <div class="stat-title">Критичні</div>
+            <div class="stat-value" id="count-critical" style="color:#dc2626;">0</div>
+        </div>
+        <div class="stat-card stat-warning" onclick="setFilter('Warning')">
+            <div class="stat-title">Попередження</div>
+            <div class="stat-value" id="count-warning" style="color:#d97706;">0</div>
+        </div>
+        <div class="stat-card stat-normal" onclick="setFilter('Normal')">
+            <div class="stat-title">Норма</div>
+            <div class="stat-value" id="count-normal" style="color:#16a34a;">0</div>
+        </div>
+    </div>
+
+    <div class="toolbar">
+        <div class="search-box">
+            <input id="search-input" placeholder="🔍 Пошук за ПІП або палатою..." oninput="renderPatients()" />
+        </div>
+        <button onclick="loadPatients()" style="padding:7px 14px; background:#fff; border:1px solid #cbd5e1; border-radius:8px; cursor:pointer;">🔄 Оновити</button>
+    </div>
+
+    <div class="grid" id="patients"></div>
+
+    <div class="forms-wrapper">
+        <div class="form">
+            <h3>📋 Додати нового пацієнта</h3>
+            <div class="form-row">
+                <input id="name" placeholder="ПІП пацієнта *" required />
+            </div>
+            <div class="form-row">
+                <input id="ward" placeholder="Палата (напр. 3)" />
+                <input id="bed" placeholder="Ліжко (напр. 2А)" />
+            </div>
+            <button class="btn-primary" id="btn-add">Додати пацієнта</button>
+        </div>
+
+        <div class="form">
+            <h3>📡 Імітатор пристрою (надсилання показників)</h3>
+            <div class="form-row">
+                <select id="patient-select">
+                    <option value="">— Оберіть пацієнта —</option>
+                </select>
+            </div>
+            <div class="presets">
+                <span style="font-size:0.75rem; color:#64748b; align-self:center;">Пресети:</span>
+                <button type="button" class="btn-preset" onclick="applyPreset('normal')">🟢 Норма</button>
+                <button type="button" class="btn-preset" onclick="applyPreset('tachycardia')">🟡 Тахікардія</button>
+                <button type="button" class="btn-preset" onclick="applyPreset('critical')">🔴 Критичний стан</button>
+            </div>
+            <div class="form-row">
+                <input id="hr" placeholder="Пульс (уд/хв)" type="number" />
+                <input id="sbp" placeholder="Сист. АТ (мм)" type="number" />
+                <input id="dbp" placeholder="Діаст. АТ (мм)" type="number" />
+            </div>
+            <div class="form-row">
+                <input id="spo2" placeholder="SpO₂ (%)" type="number" step="0.1" />
+                <input id="temp" placeholder="Темп. (°C)" type="number" step="0.1" />
+                <input id="rr" placeholder="Дихання (/хв)" type="number" />
+            </div>
+            <button class="btn-primary" id="btn-send">Надіслати вимірювання</button>
+            <button type="button" class="btn-preset" id="btn-send-batch" style="width:100%; margin-top:8px; padding:6px; background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; font-weight:500;">📦 Надіслати тестовий пакет (3 вимірювання)</button>
+        </div>
+    </div>
+
+    <div id="log-container">
+        <div class="log-header">
+            <span>📝 ЖУРНАЛ СИСТЕМНИХ ПОДІЙ (SIGNALR)</span>
+            <button onclick="$('log').innerHTML=''" style="background:none; border:none; color:#64748b; cursor:pointer; font-size:0.75rem;">Очистити</button>
+        </div>
+        <div id="log"></div>
+    </div>
+</main>
+
+<script>
+let patients = [];
+let currentFilter = 'all';
+let hub = null;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const log = (msg, cls='info') => {
+    const el = document.createElement('div');
+    el.className = cls;
+    el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    $('log').prepend(el);
+};
+
+function setFilter(filter) {
+    currentFilter = filter;
+    document.querySelectorAll('.stat-card').forEach(el => el.classList.remove('active'));
+    if (filter === 'all') document.querySelector('.stat-all').classList.add('active');
+    else if (filter === 'Critical') document.querySelector('.stat-critical').classList.add('active');
+    else if (filter === 'Warning') document.querySelector('.stat-warning').classList.add('active');
+    else if (filter === 'Normal') document.querySelector('.stat-normal').classList.add('active');
+    renderPatients();
+}
+
+function updateCounts() {
+    let critical = 0, warning = 0, normal = 0;
+    for (const p of patients) {
+        const s = (p.latestVitals?.status || 'Normal');
+        if (s === 'Critical') critical++;
+        else if (s === 'Warning') warning++;
+        else normal++;
+    }
+    $('count-all').textContent = patients.length;
+    $('count-critical').textContent = critical;
+    $('count-warning').textContent = warning;
+    $('count-normal').textContent = normal;
+}
+
+function renderPatients() {
+    updateCounts();
+    const query = ($('search-input')?.value || '').toLowerCase().trim();
+    
+    let filtered = patients.filter(p => {
+        const name = (p.fullName || '').toLowerCase();
+        const ward = (p.ward || '').toLowerCase();
+        const bed = (p.bed || '').toLowerCase();
+        const matchesQuery = !query || name.includes(query) || ward.includes(query) || bed.includes(query);
+        
+        const status = (p.latestVitals?.status || 'Normal');
+        const matchesStatus = currentFilter === 'all' || status === currentFilter;
+        return matchesQuery && matchesStatus;
+    });
+
+    // Сортуємо: Critical -> Warning -> Normal -> за іменем
+    const statusWeight = { 'Critical': 0, 'Warning': 1, 'Normal': 2 };
+    filtered.sort((a, b) => {
+        const sa = a.latestVitals?.status || 'Normal';
+        const sb = b.latestVitals?.status || 'Normal';
+        const wa = statusWeight[sa] ?? 3;
+        const wb = statusWeight[sb] ?? 3;
+        if (wa !== wb) return wa - wb;
+        return (a.fullName || '').localeCompare(b.fullName || '');
+    });
+
+    const container = $('patients');
+    if (filtered.length === 0) {
+        container.innerHTML = '<div class="empty">Немає пацієнтів для відображення</div>';
+    } else {
+        container.innerHTML = filtered.map(p => {
+            const v = p.latestVitals;
+            const status = v?.status || 'Normal';
+            const statusLower = status.toLowerCase();
+            const alerts = v?.alerts || [];
+            
+            return `
+            <div class="card card-${statusLower}">
+                <div>
+                    <div class="card-header">
+                        <h2>
+                            <span class="status-dot dot-${statusLower}"></span>
+                            ${esc(p.fullName)}
+                        </h2>
+                        <span class="badge badge-${statusLower}">${status}</span>
+                    </div>
+
+                    <div class="patient-meta">
+                        ${p.ward ? `<span>Палата: <b>${esc(p.ward)}</b></span>` : ''}
+                        ${p.bed ? `<span>Ліжко: <b>${esc(p.bed)}</b></span>` : ''}
+                        <span>ID: ${p.id.substring(0,8)}…</span>
+                    </div>
+
+                    ${v ? `
+                    <div class="vitals-grid">
+                        <div class="vital-item">
+                            <span class="vital-label">Пульс</span>
+                            <span class="vital-value">${v.heartRate ?? '—'} <small>уд/хв</small></span>
+                        </div>
+                        <div class="vital-item">
+                            <span class="vital-label">Артеріальний тиск</span>
+                            <span class="vital-value">${v.systolicBloodPressure ?? '—'}/${v.diastolicBloodPressure ?? '—'} <small>мм</small></span>
+                        </div>
+                        <div class="vital-item">
+                            <span class="vital-label">Сатурація SpO₂</span>
+                            <span class="vital-value">${v.oxygenSaturation != null ? v.oxygenSaturation + '%' : '—'}</span>
+                        </div>
+                        <div class="vital-item">
+                            <span class="vital-label">Температура</span>
+                            <span class="vital-value">${v.temperature != null ? v.temperature + '°C' : '—'}</span>
+                        </div>
+                        <div class="vital-item">
+                            <span class="vital-label">Частота дихання</span>
+                            <span class="vital-value">${v.respiratoryRate != null ? v.respiratoryRate + '/хв' : '—'}</span>
+                        </div>
+                        <div class="vital-item">
+                            <span class="vital-label">Джерело</span>
+                            <span class="vital-value">${esc(v.deviceId || 'Сенсор')}</span>
+                        </div>
+                        <div class="vital-time">Останнє вимірювання: ${new Date(v.recordedAt).toLocaleTimeString('uk-UA')}</div>
+                    </div>
+                    ` : '<div class="empty" style="padding:16px;">Показники ще не надходили</div>'}
+
+                    ${alerts.length ? `
+                    <div class="alerts ${status === 'Warning' ? 'alerts-warning' : ''}">
+                        ${alerts.map(a => `<div>⚠️ ${esc(a.message)}</div>`).join('')}
+                    </div>` : ''}
+                </div>
+
+                <div class="card-actions">
+                    <button class="btn-outline-primary" onclick="exportPatientVitals('${p.id}', '${esc(p.fullName)}')">📥 Експорт (CSV)</button>
+                    <button class="btn-outline-danger" onclick="deactivatePatient('${p.id}', '${esc(p.fullName)}')">Виписати</button>
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    // Оновлюємо випадаючий список вибору пацієнта
+    const currentSelected = $('patient-select').value;
+    $('patient-select').innerHTML = '<option value="">— Оберіть пацієнта —</option>' +
+        patients.map(p => `<option value="${p.id}" ${p.id === currentSelected ? 'selected' : ''}>${esc(p.fullName)} (${p.ward ? 'П:'+esc(p.ward) : p.id.substring(0,6)})</option>`).join('');
+}
+
+async function api(url, opts = {}) {
+    const r = await fetch(url, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts
+    });
+    if (!r.ok) {
+        const errText = await r.text();
+        throw new Error(errText || `HTTP ${r.status}`);
+    }
+    if (r.status === 204) return null;
+    return r.json();
+}
+
+async function loadPatients() {
+    try {
+        patients = await api('/api/patients');
+        renderPatients();
+    } catch (e) {
+        log(`Помилка завантаження пацієнтів: ${e.message}`, 'err');
+    }
+}
+
+async function addPatient() {
+    const nameInput = $('name');
+    const fullName = nameInput.value.trim();
+    if (!fullName) return alert('Будь ласка, введіть ПІП пацієнта');
+
+    const body = {
+        fullName,
+        ward: $('ward').value.trim() || null,
+        bed: $('bed').value.trim() || null
+    };
+
+    try {
+        const created = await api('/api/patients', { method: 'POST', body: JSON.stringify(body) });
+        log(`Створено пацієнта: ${created.fullName}`, 'success');
+        nameInput.value = '';
+        $('ward').value = '';
+        $('bed').value = '';
+        await loadPatients();
+        $('patient-select').value = created.id;
+    } catch (e) {
+        log(`Помилка створення пацієнта: ${e.message}`, 'err');
+    }
+}
+
+async function deactivatePatient(id, name) {
+    if (!confirm(`Ви дійсно бажаєте виписати пацієнта "${name}"?`)) return;
+    try {
+        await api(`/api/patients/${id}`, { method: 'DELETE' });
+        log(`Пацієнта ${name} виписано`, 'warn');
+        await loadPatients();
+    } catch (e) {
+        log(`Помилка виписки: ${e.message}`, 'err');
+    }
+}
+
+function exportPatientVitals(id, name) {
+    log(`Завантаження CSV-експорту для: ${name}...`, 'info');
+    window.location.href = `/api/patients/${id}/vitals/export?format=csv`;
+}
+
+function applyPreset(type) {
+    if (type === 'normal') {
+        $('hr').value = 72;
+        $('sbp').value = 120;
+        $('dbp').value = 80;
+        $('spo2').value = 98;
+        $('temp').value = 36.6;
+        $('rr').value = 16;
+    } else if (type === 'tachycardia') {
+        $('hr').value = 118;
+        $('sbp').value = 145;
+        $('dbp').value = 92;
+        $('spo2').value = 93.5;
+        $('temp').value = 37.8;
+        $('rr').value = 22;
+    } else if (type === 'critical') {
+        $('hr').value = 138;
+        $('sbp').value = 185;
+        $('dbp').value = 125;
+        $('spo2').value = 85.0;
+        $('temp').value = 39.8;
+        $('rr').value = 32;
+    }
+}
+
+async function sendVitals() {
+    const patientId = $('patient-select').value;
+    if (!patientId) return alert('Оберіть пацієнта зі списку');
+
+    const hr = $('hr').value;
+    const sbp = $('sbp').value;
+    const dbp = $('dbp').value;
+    const spo2 = $('spo2').value;
+    const temp = $('temp').value;
+    const rr = $('rr').value;
+
+    if (!hr && !sbp && !dbp && !spo2 && !temp && !rr) {
+        return alert('Заповніть хоча б один показник');
+    }
+
+    const payload = {
+        deviceId: 'web-sensor-simulator'
+    };
+    if (hr) payload.heartRate = parseInt(hr, 10);
+    if (sbp) payload.systolicBloodPressure = parseInt(sbp, 10);
+    if (dbp) payload.diastolicBloodPressure = parseInt(dbp, 10);
+    if (spo2) payload.oxygenSaturation = parseFloat(spo2);
+    if (temp) payload.temperature = parseFloat(temp);
+    if (rr) payload.respiratoryRate = parseInt(rr, 10);
+
+    try {
+        const result = await api(`/api/patients/${patientId}/vitals`, {
+            method: 'POST',
+            body: JSON.stringify(payload)
+        });
+        log(`Надіслано показники: HR=${result.heartRate ?? '—'}, BP=${result.systolicBloodPressure ?? '—'}/${result.diastolicBloodPressure ?? '—'} -> Стан: ${result.status}`, result.status === 'Critical' ? 'err' : result.status === 'Warning' ? 'warn' : 'info');
+    } catch (e) {
+        log(`Помилка надсилання: ${e.message}`, 'err');
+    }
+}
+
+async function sendBatchVitals() {
+    const patientId = $('patient-select').value;
+    if (!patientId) return alert('Оберіть пацієнта зі списку');
+
+    const now = new Date();
+    const batch = {
+        items: [
+            { heartRate: 74, systolicBloodPressure: 120, diastolicBloodPressure: 80, oxygenSaturation: 98.0, temperature: 36.6, respiratoryRate: 16, recordedAt: new Date(now.getTime() - 10*60*1000).toISOString() },
+            { heartRate: 85, systolicBloodPressure: 125, diastolicBloodPressure: 82, oxygenSaturation: 97.0, temperature: 36.8, respiratoryRate: 17, recordedAt: new Date(now.getTime() - 5*60*1000).toISOString() },
+            { heartRate: 122, systolicBloodPressure: 142, diastolicBloodPressure: 92, oxygenSaturation: 93.0, temperature: 38.1, respiratoryRate: 21, recordedAt: now.toISOString() }
+        ]
+    };
+
+    try {
+        const result = await api(`/api/patients/${patientId}/vitals/batch`, { method: 'POST', body: JSON.stringify(batch) });
+        log(`Надіслано пакет: збережено ${result.insertedCount} записів. Останній стан: ${result.latestRecorded?.status}`, 'success');
+    } catch (e) {
+        log(`Помилка пакетного надсилання: ${e.message}`, 'err');
+    }
+}
+
+async function checkHealth() {
+    try {
+        const r = await fetch('/healthz');
+        if (r.ok) {
+            $('health-status').textContent = '💚 БД: OK';
+            $('health-status').className = 'badge badge-normal';
+        } else {
+            $('health-status').textContent = '💔 БД: Помилка';
+            $('health-status').className = 'badge badge-critical';
+        }
+    } catch {
+        $('health-status').textContent = '💔 Збій';
+        $('health-status').className = 'badge badge-critical';
+    }
+}
+
+async function connectHub() {
+    const statusBadge = $('connection-status');
+    statusBadge.textContent = '● Підключення...';
+    statusBadge.className = 'badge badge-warning';
+
+    hub = new signalR.HubConnectionBuilder()
+        .withUrl('/hubs/monitoring')
+        .withAutomaticReconnect([0, 2000, 5000, 10000, 30000])
+        .build();
+
+    hub.on('VitalSignsReceived', (vitals) => {
+        const patientName = vitals.patientFullName || 'Пацієнт';
+        log(`[SignalR] Показники: ${patientName} (${vitals.patientId.substring(0,8)}…) -> ${vitals.status}`, vitals.status === 'Critical' ? 'err' : vitals.status === 'Warning' ? 'warn' : 'info');
+
+        const idx = patients.findIndex(p => p.id === vitals.patientId);
+        if (idx >= 0) {
+            patients[idx].latestVitals = vitals;
+            if (vitals.patientFullName) patients[idx].fullName = vitals.patientFullName;
+            renderPatients();
+        } else {
+            loadPatients();
+        }
+    });
+
+    hub.on('PatientAlert', (alert) => {
+        log(`🚨 [SignalR УВАГА] ${alert.patientFullName} вийшов(ла) за норму (${alert.status})!`, 'err');
+        const idx = patients.findIndex(p => p.id === alert.patientId);
+        if (idx >= 0 && patients[idx].latestVitals) {
+            patients[idx].latestVitals.status = alert.status;
+            patients[idx].latestVitals.alerts = alert.alerts;
+            renderPatients();
+        }
+    });
+
+    hub.onreconnecting(() => {
+        statusBadge.textContent = '● Перепідключення...';
+        statusBadge.className = 'badge badge-warning';
+    });
+
+    hub.onreconnected(() => {
+        statusBadge.textContent = '● Підключено';
+        statusBadge.className = 'badge badge-normal';
+        log('SignalR перепідключено', 'success');
+        hub.invoke('SubscribeToAll');
+    });
+
+    hub.onclose(() => {
+        statusBadge.textContent = '● Відключено';
+        statusBadge.className = 'badge badge-critical';
+        log('SignalR з\'єднання розірвано', 'err');
+    });
+
+    try {
+        await hub.start();
+        await hub.invoke('SubscribeToAll');
+        statusBadge.textContent = '● Підключено';
+        statusBadge.className = 'badge badge-normal';
+        log('SignalR успішно підключено та підписано на оновлення', 'success');
+    } catch (e) {
+        statusBadge.textContent = '● Помилка';
+        statusBadge.className = 'badge badge-critical';
+        log(`Помилка підключення SignalR: ${e.message}`, 'err');
+    }
+}
+
+// ── Ініціалізація ────────────────────────────────────────────────────
+(async () => {
+    $('btn-add').onclick = addPatient;
+    $('btn-send').onclick = sendVitals;
+    $('btn-send-batch').onclick = sendBatchVitals;
+
+    await loadPatients();
+    await connectHub();
+    await checkHealth();
+    setInterval(checkHealth, 15000);
+})();
+</script>
+</body>
+</html>
