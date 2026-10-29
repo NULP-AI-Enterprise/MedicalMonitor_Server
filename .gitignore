@@ -427,3 +427,6 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Local-only dependency checkout (not part of this repo)
+MedicalMonitor_Desktop/
