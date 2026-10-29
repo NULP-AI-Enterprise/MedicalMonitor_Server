@@ -40,6 +40,102 @@ public class CentralStationContractApiIntegrationTests : IClassFixture<PatientMo
     }
 
     [Fact]
+    public async Task Swagger_Endpoints_Work()
+    {
+        // 1. Swagger UI
+        var swaggerUiResp = await _client.GetAsync("/swagger/index.html");
+        Assert.Equal(HttpStatusCode.OK, swaggerUiResp.StatusCode);
+        var html = await swaggerUiResp.Content.ReadAsStringAsync();
+        Assert.Contains("swagger", html, StringComparison.OrdinalIgnoreCase);
+
+        // 2. Swagger JSON specification
+        var swaggerJsonResp = await _client.GetAsync("/swagger/v1/swagger.json");
+        Assert.Equal(HttpStatusCode.OK, swaggerJsonResp.StatusCode);
+        var json = await swaggerJsonResp.Content.ReadAsStringAsync();
+        Assert.Contains("/api/v1/patients", json);
+        Assert.Contains("/api/v1/health", json);
+        Assert.Contains("/api/v1/alerts/active", json);
+        Assert.Contains("/api/v1/ingestion/telemetry", json);
+    }
+
+    [Fact]
+    public async Task RootRoute_ServesCentralNurseStationStaticFiles()
+    {
+        var response = await _client.GetAsync("/");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var content = await response.Content.ReadAsStringAsync();
+        Assert.Contains("Central Nurse Station", content, StringComparison.OrdinalIgnoreCase);
+
+        var appJsResponse = await _client.GetAsync("/app.js");
+        Assert.Equal(HttpStatusCode.OK, appJsResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task JsonSerialization_StrictCamelCaseAndStringEnums()
+    {
+        // 1. Health response
+        var healthResp = await _client.GetAsync("/api/v1/health");
+        var healthJson = await healthResp.Content.ReadAsStringAsync();
+        Assert.Contains("\"status\"", healthJson);
+        Assert.Contains("\"timestamp\"", healthJson);
+        Assert.Contains("\"activePatients\"", healthJson);
+        Assert.Contains("\"connectedStations\"", healthJson);
+        Assert.DoesNotContain("\"Status\"", healthJson);
+        Assert.DoesNotContain("\"ActivePatients\"", healthJson);
+
+        // 2. Patients list response
+        var patientsResp = await _client.GetAsync("/api/v1/patients");
+        var patientsJson = await patientsResp.Content.ReadAsStringAsync();
+        Assert.Contains("\"patientId\"", patientsJson);
+        Assert.Contains("\"patientName\"", patientsJson);
+        Assert.Contains("\"bedNumber\"", patientsJson);
+        Assert.Contains("\"patientType\"", patientsJson);
+        Assert.DoesNotContain("\"PatientId\"", patientsJson);
+        Assert.DoesNotContain("\"PatientName\"", patientsJson);
+
+        // 3. Vitals response
+        var vitalsResp = await _client.GetAsync("/api/v1/patients/P001/vitals/latest");
+        var vitalsJson = await vitalsResp.Content.ReadAsStringAsync();
+        Assert.Contains("\"heartRate\"", vitalsJson);
+        Assert.Contains("\"spO2\"", vitalsJson);
+        Assert.Contains("\"nibp\"", vitalsJson);
+        Assert.Contains("\"systolic\"", vitalsJson);
+        Assert.Contains("\"diastolic\"", vitalsJson);
+        Assert.Contains("\"meanArterialPressure\"", vitalsJson);
+        Assert.Contains("\"respiratoryRate\"", vitalsJson);
+        Assert.Contains("\"temperature\"", vitalsJson);
+        Assert.Contains("\"pulseRate\"", vitalsJson);
+        Assert.DoesNotContain("\"HeartRate\"", vitalsJson);
+        Assert.DoesNotContain("\"SpO2\"", vitalsJson);
+    }
+
+    [Fact]
+    public async Task CreatePatient_WhenRequiredFieldsMissing_ReturnsBadRequest()
+    {
+        var invalid = new PatientInfoDto("", "", 0, null, "Adu");
+        var response = await _client.PostAsJsonAsync("/api/v1/patients", invalid);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task IngestHardwareAlert_ReturnsAccepted()
+    {
+        var alert = new AlertDto(
+            AlertId: "P001:HeartRate",
+            PatientId: "P001",
+            VitalSign: VitalSignType.HeartRate,
+            Severity: AlertSeverity.Critical,
+            Message: "HR critically high: 162 bpm",
+            Value: 162.0,
+            Timestamp: DateTimeOffset.UtcNow,
+            IsAcknowledged: false
+        );
+
+        var response = await _client.PostAsJsonAsync("/api/v1/ingestion/alerts", alert);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+    }
+
+    [Fact]
     public async Task GetPatients_ReturnsPatientListOrderedByBedNumber()
     {
         // Act

@@ -3,6 +3,17 @@ using PatientMonitoring.Api.Models;
 
 namespace PatientMonitoring.Api.Services.CentralStation;
 
+/// <summary>Порушення правил станції (дубль ID, зайняте ліжко). Відповідь — 409 Conflict.</summary>
+public sealed class CentralStationConflictException(string message) : Exception(message);
+
+public static class CentralStationRules
+{
+    public static readonly string[] PatientTypes = ["Adu", "Ped", "Neo"];
+
+    public static bool IsValidPatientType(string? patientType) =>
+        string.IsNullOrWhiteSpace(patientType) || PatientTypes.Contains(patientType, StringComparer.Ordinal);
+}
+
 public interface ICentralStationService
 {
     int ConnectedStationsCount { get; }
@@ -20,7 +31,8 @@ public interface ICentralStationService
     Task<AlertDto?> AcknowledgeAlertAsync(string alertId);
 
     Task ProcessTelemetryAsync(MonitorUpdateDto telemetry, CancellationToken ct = default);
-    Task ProcessAlertAsync(AlertDto alert, CancellationToken ct = default);
+    Task<bool> ProcessAlertAsync(AlertDto alert, CancellationToken ct = default);
     Task ProcessVitalSignsRecordedAsync(Patient patient, VitalSign vitals, CancellationToken ct = default);
+    Task SyncPatientAsync(Patient patient, CancellationToken ct = default);
     Task PublishTickAsync(CancellationToken ct = default);
 }

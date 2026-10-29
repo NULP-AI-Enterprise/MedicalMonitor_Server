@@ -23,6 +23,7 @@ services:
       dockerfile: src/PatientMonitoring.Api/Dockerfile
     container_name: patient-monitoring-api
     ports:
+      - "5000:5000"
       - "5225:5225"
     environment:
       - ASPNETCORE_ENVIRONMENT=Development

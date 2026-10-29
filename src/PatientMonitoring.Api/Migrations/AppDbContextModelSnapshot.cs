@@ -46,6 +46,17 @@ namespace PatientMonitoring.Api.Migrations
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("PatientType")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasDefaultValue("Adu");
+
+                    b.Property<string>("StationPatientId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<string>("Ward")
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)");

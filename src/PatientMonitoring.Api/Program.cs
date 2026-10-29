@@ -1,4 +1,5 @@
 using FastEndpoints;
+using FastEndpoints.Swagger;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
@@ -6,6 +7,7 @@ using Microsoft.IdentityModel.Tokens;
 using PatientMonitoring.Api.Contracts;
 using PatientMonitoring.Api.Data;
 using PatientMonitoring.Api.Hubs;
+using PatientMonitoring.Api.Serialization;
 using PatientMonitoring.Api.Services;
 using PatientMonitoring.Api.Services.Alerting;
 using PatientMonitoring.Api.Services.Auth;
@@ -13,24 +15,44 @@ using PatientMonitoring.Api.Services.Caching;
 using PatientMonitoring.Api.Services.Relay;
 using Scalar.AspNetCore;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
+// Clinical numbers are written with the invariant culture everywhere ("35.5 °C", never "35,5 °C").
+System.Globalization.CultureInfo.DefaultThreadCurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+System.Globalization.CultureInfo.DefaultThreadCurrentUICulture = System.Globalization.CultureInfo.InvariantCulture;
+
 var builder = WebApplication.CreateBuilder(args);
+
+// API Contract §1: the API always listens on port 5000, whatever ASPNETCORE_URLS says. Port 5225 stays for older clients.
+builder.WebHost.UseUrls("http://0.0.0.0:5000", "http://0.0.0.0:5225");
 
 // ── Налаштування сервісів ───────────────────────────────────────────────
 builder.Services.AddFastEndpoints();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
+    options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    options.SerializerOptions.Converters.Add(new UtcIsoDateTimeOffsetConverter());
+});
+
+// Swagger / OpenAPI документація для FastEndpoints
+builder.Services.SwaggerDocument(o =>
+{
+    o.DocumentSettings = s =>
+    {
+        s.DocumentName = "v1";
+        s.Title = "Patient Monitoring API";
+        s.Version = "v1";
+        s.Description = "Real-time Patient Monitoring API & Central Nurse Station Backend (Mindray uMEC compatible)";
+    };
 });
 
 // .NET 10: вбудований OpenAPI
 builder.Services.AddOpenApi();
 
-// Конфігурація порогів
-builder.Services.AddOptions<VitalThresholds>()
-    .Bind(builder.Configuration.GetRequiredSection(VitalThresholds.SectionName))
-    .ValidateOnStart();
+// Пороги тривог — фіксовані клінічні значення контракту (Monitoring.Shared.VitalThresholds)
+builder.Services.AddOptions<VitalThresholds>();
 
 // База даних
 builder.Services.AddDbContext<AppDbContext>(options =>
@@ -88,11 +110,18 @@ builder.Services.AddSingleton<IPatientNotifier, SignalRPatientNotifier>();
 builder.Services.AddScoped<IVitalSignsAnalyzer, VitalSignsAnalyzer>();
 builder.Services.AddScoped<IPatientService, PatientService>();
 builder.Services.AddScoped<IVitalSignsService, VitalSignsService>();
+builder.Services.AddSingleton<MedicalMonitorServer.DeviceDriver.Umec.IParserService, MedicalMonitorServer.DeviceDriver.Umec.ParserService>();
+builder.Services.AddScoped<PatientMonitoring.Api.Services.Parser.IUmecParserBridge, PatientMonitoring.Api.Services.Parser.UmecParserBridge>();
 
 // Контракт Central Nurse Station (MedicalMonitor_Desktop)
 builder.Services.AddSingleton<Monitoring.BL.Services.IAlertStateService, Monitoring.BL.Services.AlertStateService>();
 builder.Services.AddSingleton<PatientMonitoring.Api.Services.CentralStation.ICentralStationService, PatientMonitoring.Api.Services.CentralStation.CentralStationService>();
 builder.Services.AddHostedService<PatientMonitoring.Api.Services.CentralStation.CentralStationVitalsHostedService>();
+builder.Services.Configure<PatientMonitoring.Api.Services.CentralStation.CentralStationOptions>(
+    builder.Configuration.GetSection(PatientMonitoring.Api.Services.CentralStation.CentralStationOptions.SectionName));
+
+// База даних створюється і мігрується у фоні, щоб недоступна БД не зупиняла API.
+builder.Services.AddHostedService<DatabaseMigrationService>();
 
 // JWT Автентифікація
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
@@ -138,11 +167,13 @@ builder.Services.AddAuthorization();
 builder.Services.AddHealthChecks()
     .AddCheck<DatabaseHealthCheck>("database", tags: ["ready"]);
 
-// SignalR (JSON-протокол)
+// SignalR (JSON-протокол з рядковими енумами та camelCase)
 builder.Services.AddSignalR()
     .AddJsonProtocol(opts =>
     {
+        opts.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
         opts.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+        opts.PayloadSerializerOptions.Converters.Add(new UtcIsoDateTimeOffsetConverter());
     });
 
 // Перехресні походження (CORS): дозволити фронтенд підключитись до SignalR
@@ -159,7 +190,8 @@ builder.Services.AddCors(options =>
         policy.SetIsOriginAllowed(origin =>
         {
             if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri)) return false;
-            return uri.Host is "localhost" or "127.0.0.1" or "::1";
+            // Контракт §1: лише http://localhost:*.
+            return uri.Scheme == Uri.UriSchemeHttp && uri.Host == "localhost";
         })
         .AllowAnyHeader()
         .AllowAnyMethod()
@@ -168,38 +200,30 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// ── Початкова міграція БД (робиться автоматично) ──────────────────────────
-using (var scope = app.Services.CreateAsyncScope())
-{
-    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    if (db.Database.IsRelational())
-    {
-        await db.Database.MigrateAsync();
-    }
-    else
-    {
-        await db.Database.EnsureCreatedAsync();
-    }
-}
+// Міграція БД виконується у фоні (DatabaseMigrationService), тож API слухає порт 5000 навіть без БД.
 
 // ── Middleware ─────────────────────────────────────────────────────────────
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();               // /openapi/v1.json
     app.MapScalarApiReference();    // /scalar/v1
-    app.UseSwaggerUI(options =>     // /swagger
-    {
-        options.SwaggerEndpoint("/openapi/v1.json", "Patient Monitoring API v1");
-        options.DocumentTitle = "Patient Monitoring API — Swagger UI";
-    });
 }
 
 app.UseExceptionHandler("/error");
 app.UseStatusCodePagesWithReExecute("/error/{0}");
 
-// Статичні файли Web UI Central Nurse Station (якщо доступні)
-var desktopWwwRoot = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "MedicalMonitor_Desktop", "src", "Monitoring.WebService", "wwwroot"));
-if (Directory.Exists(desktopWwwRoot))
+// Статичні файли Web UI Central Nurse Station на кореневому маршруті /
+var candidatePaths = new[]
+{
+    Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "..", "MedicalMonitor_Desktop", "src", "Monitoring.WebService", "wwwroot")),
+    Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "MedicalMonitor_Desktop", "src", "Monitoring.WebService", "wwwroot")),
+    Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "MedicalMonitor_Desktop", "src", "Monitoring.WebService", "wwwroot")),
+    Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "wwwroot")),
+    Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "wwwroot"))
+};
+
+var desktopWwwRoot = candidatePaths.FirstOrDefault(Directory.Exists);
+if (desktopWwwRoot is not null)
 {
     app.UseDefaultFiles(new DefaultFilesOptions
     {
@@ -210,9 +234,12 @@ if (Directory.Exists(desktopWwwRoot))
         FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(desktopWwwRoot)
     });
 }
+else
+{
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
+}
 
-app.UseDefaultFiles();
-app.UseStaticFiles();
 app.UseCors("AllowLocalhost");
 app.UseRouting();
 
@@ -226,8 +253,14 @@ app.MapHealthChecks("/healthz/live", new HealthCheckOptions { Predicate = _ => f
 
 app.UseFastEndpoints(c =>
 {
+    c.Serializer.Options.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
     c.Serializer.Options.Converters.Add(new JsonStringEnumConverter());
+    c.Serializer.Options.Converters.Add(new UtcIsoDateTimeOffsetConverter());
 });
+
+// Swagger Documentation & UI
+app.UseSwaggerGen(); // /swagger/v1/swagger.json
+app.UseSwaggerUi();  // /swagger
 
 app.MapHub<PatientMonitoringHub>("/hubs/monitoring");
 app.MapHub<PatientMonitoring.Api.Hubs.VitalsHub>(Monitoring.Shared.HubMethods.Route);

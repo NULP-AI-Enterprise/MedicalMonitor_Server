@@ -116,7 +116,7 @@ public class VitalSignsServiceTests
 
         var request = new RecordVitalSignsRequest
         {
-            HeartRate = 145 // Critical (> 130)
+            HeartRate = 155 // Critical (> 150)
         };
 
         // Act
@@ -208,7 +208,7 @@ public class VitalSignsServiceTests
             {
                 new() { HeartRate = 75, RecordedAt = DateTimeOffset.UtcNow.AddMinutes(-10) },
                 new() { HeartRate = 80, RecordedAt = DateTimeOffset.UtcNow.AddMinutes(-5) },
-                new() { HeartRate = 135, RecordedAt = DateTimeOffset.UtcNow } // Critical
+                new() { HeartRate = 155, RecordedAt = DateTimeOffset.UtcNow } // Critical
             }
         };
 
@@ -219,15 +219,15 @@ public class VitalSignsServiceTests
         Assert.NotNull(result);
         Assert.Equal(3, result.InsertedCount);
         Assert.NotNull(result.LatestRecorded);
-        Assert.Equal(135, result.LatestRecorded.HeartRate);
+        Assert.Equal(155, result.LatestRecorded.HeartRate);
         Assert.Equal(VitalStatus.Critical, result.LatestRecorded.Status);
 
         var countInDb = await db.VitalSigns.CountAsync(v => v.PatientId == patientId);
         Assert.Equal(3, countInDb);
 
-        mockCache.Verify(c => c.SetLatestAsync(patientId, It.Is<VitalSignsResponse>(v => v.HeartRate == 135), It.IsAny<CancellationToken>()), Times.Once);
-        mockNotifier.Verify(n => n.NotifyVitalSignsAsync(It.Is<VitalSignsResponse>(v => v.HeartRate == 135), It.IsAny<CancellationToken>()), Times.Once);
-        mockSse.Verify(s => s.Broadcast(It.Is<VitalSignsResponse>(v => v.HeartRate == 135)), Times.Once);
+        mockCache.Verify(c => c.SetLatestAsync(patientId, It.Is<VitalSignsResponse>(v => v.HeartRate == 155), It.IsAny<CancellationToken>()), Times.Once);
+        mockNotifier.Verify(n => n.NotifyVitalSignsAsync(It.Is<VitalSignsResponse>(v => v.HeartRate == 155), It.IsAny<CancellationToken>()), Times.Once);
+        mockSse.Verify(s => s.Broadcast(It.Is<VitalSignsResponse>(v => v.HeartRate == 155)), Times.Once);
         mockRelay.Verify(r => r.RelayBatchAsync(It.Is<RecordVitalSignsBatchResponse>(b => b.InsertedCount == 3), It.IsAny<CancellationToken>()), Times.Once);
         mockAlerts.Verify(a => a.DispatchAsync(It.Is<PatientAlertNotification>(a => a.Status == VitalStatus.Critical), It.IsAny<CancellationToken>()), Times.Once);
     }

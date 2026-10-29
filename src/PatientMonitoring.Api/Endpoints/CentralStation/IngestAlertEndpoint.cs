@@ -16,7 +16,17 @@ public sealed class IngestAlertEndpoint(ICentralStationService centralStation)
 
     public override async Task HandleAsync(AlertDto req, CancellationToken ct)
     {
-        await centralStation.ProcessAlertAsync(req, ct);
+        if (string.IsNullOrWhiteSpace(req.PatientId))
+        {
+            ThrowError("patientId is required.", StatusCodes.Status400BadRequest);
+        }
+
+        if (!await centralStation.ProcessAlertAsync(req, ct))
+        {
+            await Send.NotFoundAsync(ct);
+            return;
+        }
+
         await Send.StatusCodeAsync(StatusCodes.Status202Accepted, ct);
     }
 }

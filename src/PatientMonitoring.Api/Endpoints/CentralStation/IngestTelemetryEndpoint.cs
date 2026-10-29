@@ -16,6 +16,16 @@ public sealed class IngestTelemetryEndpoint(ICentralStationService centralStatio
 
     public override async Task HandleAsync(MonitorUpdateDto req, CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(req.PatientId))
+        {
+            ThrowError("patientId is required.", StatusCodes.Status400BadRequest);
+        }
+
+        if (req.Vitals?.Nibp is null)
+        {
+            ThrowError("vitals and vitals.nibp are required.", StatusCodes.Status400BadRequest);
+        }
+
         await centralStation.ProcessTelemetryAsync(req, ct);
         await Send.StatusCodeAsync(StatusCodes.Status202Accepted, ct);
     }

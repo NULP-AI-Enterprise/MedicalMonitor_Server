@@ -2,7 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using PatientMonitoring.Api.Contracts;
 using PatientMonitoring.Api.Data;
 using PatientMonitoring.Api.Models;
-
+using PatientMonitoring.Api.Services.CentralStation;
 using PatientMonitoring.Api.Services.Caching;
 
 namespace PatientMonitoring.Api.Services;
@@ -23,7 +23,11 @@ public interface IPatientService
     Task<bool> DeactivateAsync(Guid id, CancellationToken cancellationToken = default);
 }
 
-public sealed class PatientService(AppDbContext db, IVitalSignsAnalyzer analyzer, IVitalSignsCache cache) : IPatientService
+public sealed class PatientService(
+    AppDbContext db,
+    IVitalSignsAnalyzer analyzer,
+    IVitalSignsCache cache,
+    ICentralStationService? centralStation = null) : IPatientService
 {
     public async Task<IReadOnlyList<PatientResponse>> GetAllAsync(bool includeInactive, CancellationToken cancellationToken = default)
     {
@@ -81,6 +85,7 @@ public sealed class PatientService(AppDbContext db, IVitalSignsAnalyzer analyzer
 
         db.Patients.Add(patient);
         await db.SaveChangesAsync(cancellationToken);
+        await SyncWithStationAsync(patient, cancellationToken);
 
         return patient.ToResponse(latestVitals: null);
     }
@@ -100,6 +105,7 @@ public sealed class PatientService(AppDbContext db, IVitalSignsAnalyzer analyzer
         patient.IsActive = request.IsActive;
 
         await db.SaveChangesAsync(cancellationToken);
+        await SyncWithStationAsync(patient, cancellationToken);
         await cache.InvalidateAsync(id, cancellationToken);
 
         return await GetByIdAsync(id, cancellationToken);
@@ -115,7 +121,12 @@ public sealed class PatientService(AppDbContext db, IVitalSignsAnalyzer analyzer
 
         patient.IsActive = false;
         await db.SaveChangesAsync(cancellationToken);
+        await SyncWithStationAsync(patient, cancellationToken);
         await cache.InvalidateAsync(id, cancellationToken);
         return true;
     }
+
+    // Keeps the Central Nurse Station roster in step with the patient registry (new patient, changes, discharge).
+    private Task SyncWithStationAsync(Patient patient, CancellationToken cancellationToken) =>
+        centralStation is null ? Task.CompletedTask : centralStation.SyncPatientAsync(patient, cancellationToken);
 }

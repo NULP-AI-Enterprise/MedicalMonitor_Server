@@ -3,8 +3,14 @@ using PatientMonitoring.Api.Services.CentralStation;
 
 namespace PatientMonitoring.Api.Endpoints.CentralStation;
 
+public sealed record HealthCheckResponse(
+    string Status,
+    DateTimeOffset Timestamp,
+    int ActivePatients,
+    int ConnectedStations);
+
 public sealed class GetHealthEndpoint(ICentralStationService centralStation)
-    : EndpointWithoutRequest<object>
+    : EndpointWithoutRequest<HealthCheckResponse>
 {
     public override void Configure()
     {
@@ -15,12 +21,11 @@ public sealed class GetHealthEndpoint(ICentralStationService centralStation)
     public override async Task HandleAsync(CancellationToken ct)
     {
         var patients = await centralStation.GetPatientsAsync(ct);
-        await Send.OkAsync(new
-        {
-            status = "Healthy",
-            timestamp = DateTime.UtcNow,
-            activePatients = patients.Count,
-            connectedStations = centralStation.ConnectedStationsCount
-        }, ct);
+        await Send.OkAsync(new HealthCheckResponse(
+            Status: "Healthy",
+            Timestamp: DateTimeOffset.UtcNow,
+            ActivePatients: patients.Count,
+            ConnectedStations: centralStation.ConnectedStationsCount
+        ), ct);
     }
 }

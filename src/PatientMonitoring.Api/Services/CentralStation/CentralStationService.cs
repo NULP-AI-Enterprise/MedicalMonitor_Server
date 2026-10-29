@@ -1,10 +1,11 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Monitoring.BL.Services;
 using Monitoring.Shared;
 using Monitoring.Shared.DTOs;
@@ -19,6 +20,10 @@ public sealed class CentralStationService : ICentralStationService
     private sealed class PatientSimulationState
     {
         public required string PatientId { get; init; }
+
+        // Demo beds are simulated. A bed reported by a device shows only the device's own values.
+        public bool IsSimulated { get; set; }
+
         public double BaseHeartRate { get; set; }
         public double BaseSpO2 { get; set; }
         public double BaseSystolic { get; set; }
@@ -31,7 +36,13 @@ public sealed class CentralStationService : ICentralStationService
         public double RespPhase { get; set; }
 
         public VitalsDto? LastExternalVitals { get; set; }
-        public DateTimeOffset? LastExternalRecordedAt { get; set; }
+
+        // When the monitor last reported. A monitor silent for longer than the limit counts as disconnected.
+        public DateTimeOffset LastDeviceReadingAt { get; set; }
+        public bool IsStale { get; set; }
+
+        // Samples the gateway sent, played out on the ticks at the contract's sample rates.
+        public DeviceWaveformBuffer Waveforms { get; } = new();
 
         public VitalSignType? EpisodeVital { get; set; }
         public double EpisodeMagnitude { get; set; }
@@ -39,13 +50,112 @@ public sealed class CentralStationService : ICentralStationService
         public int EpisodeTicksTotal { get; set; }
     }
 
+    /// <summary>
+    /// Samples a gateway sent, waiting for their tick. Each tick takes one 500 ms slice, so the traces move at the real
+    /// sample rate. At most two seconds are kept: a stalled feed must not turn into a trace that lags behind the clock.
+    /// </summary>
+    private sealed class DeviceWaveformBuffer
+    {
+        private static readonly int EcgCapacity = 2 * WaveformSynthesizer.EcgSampleRate;
+        private static readonly int SlowCapacity = 2 * WaveformSynthesizer.SlowSampleRate;
+
+        private readonly Queue<float> _ecg = new();
+        private readonly Queue<float> _pleth = new();
+        private readonly Queue<float> _respiration = new();
+
+        // Pleth and respiration are centred on 0 (contract 4.4). Gateway values may sit above 0, so a slow offset is
+        // removed; the time constant leaves breathing (about 0.2 Hz and up) and the pulse shape untouched.
+        private readonly SlowOffsetRemover _plethOffset = new(WaveformSynthesizer.SlowSampleRate);
+        private readonly SlowOffsetRemover _respirationOffset = new(WaveformSynthesizer.SlowSampleRate);
+
+        public void Enqueue(WaveformSampleDto[]? waveforms)
+        {
+            foreach (var wave in waveforms ?? Array.Empty<WaveformSampleDto>())
+            {
+                var samples = wave.Samples ?? Array.Empty<float>();
+                switch (wave.Type)
+                {
+                    case WaveformType.ECG_II:
+                        Append(_ecg, samples, EcgCapacity, null);
+                        break;
+                    case WaveformType.Pleth:
+                        Append(_pleth, samples, SlowCapacity, _plethOffset);
+                        break;
+                    case WaveformType.Respiration:
+                        Append(_respiration, samples, SlowCapacity, _respirationOffset);
+                        break;
+                }
+            }
+        }
+
+        /// <summary>One tick: up to 125 ECG and 25 Pleth/Respiration samples. Fewer only when the feed is behind.</summary>
+        public WaveformSampleDto[] Take() =>
+        [
+            new WaveformSampleDto(WaveformType.ECG_II, Dequeue(_ecg, GeneratorSettings.EcgSamplesPerUpdate), WaveformSynthesizer.EcgSampleRate),
+            new WaveformSampleDto(WaveformType.Pleth, Dequeue(_pleth, GeneratorSettings.SlowSamplesPerUpdate), WaveformSynthesizer.SlowSampleRate),
+            new WaveformSampleDto(WaveformType.Respiration, Dequeue(_respiration, GeneratorSettings.SlowSamplesPerUpdate), WaveformSynthesizer.SlowSampleRate)
+        ];
+
+        public void Clear()
+        {
+            _ecg.Clear();
+            _pleth.Clear();
+            _respiration.Clear();
+        }
+
+        private static void Append(Queue<float> queue, float[] samples, int capacity, SlowOffsetRemover? offset)
+        {
+            foreach (var sample in samples) queue.Enqueue(offset is null ? sample : offset.Remove(sample));
+            while (queue.Count > capacity) queue.Dequeue();
+        }
+
+        private static float[] Dequeue(Queue<float> queue, int count)
+        {
+            var taken = new float[Math.Min(count, queue.Count)];
+            for (var i = 0; i < taken.Length; i++) taken[i] = queue.Dequeue();
+            return taken;
+        }
+    }
+
+    /// <summary>Removes a slow offset from a sampled signal: an exponential moving average with a 5 s time constant.</summary>
+    private sealed class SlowOffsetRemover
+    {
+        private const double TimeConstantSeconds = 5.0;
+
+        private readonly double _alpha;
+        private double _level;
+        private bool _started;
+
+        public SlowOffsetRemover(int sampleRate) => _alpha = 1.0 / (TimeConstantSeconds * sampleRate);
+
+        public float Remove(float sample)
+        {
+            if (!_started)
+            {
+                _level = sample;
+                _started = true;
+            }
+
+            _level += (sample - _level) * _alpha;
+            return (float)(sample - _level);
+        }
+    }
+
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IAlertStateService _alertState;
     private readonly IHubContext<VitalsHub> _hubContext;
     private readonly ILogger<CentralStationService> _logger;
 
+    // Serialises every change to the roster, vitals, simulation and alert state, so a tick that is
+    // already running cannot bring back a patient who was discharged in the meantime.
+    private readonly object _rosterLock = new();
+
+    // Alarms raised by monitors. They stay until a clinician acknowledges them, whatever the vitals say.
+    private readonly ConcurrentDictionary<string, AlertDto> _deviceAlarms = new();
+
     private int _connectedStations;
     private bool _databaseSynced;
+    private DateTimeOffset _nextSyncAttempt = DateTimeOffset.MinValue;
     private readonly SemaphoreSlim _syncLock = new(1, 1);
 
     private readonly ConcurrentDictionary<string, PatientInfoDto> _patients = new();
@@ -57,18 +167,26 @@ public sealed class CentralStationService : ICentralStationService
     private const int EpisodeMinTicks = 16;  //  8 s
     private const int EpisodeMaxTicks = 48;  // 24 s
 
+    // The Pleth shape of Monitoring.BL has a mean of about -0.166; the contract requires samples centred on 0.
+    private const float PlethBaselineCorrection = 0.166f;
+
+    // A device-fed bed whose monitor has been silent for this long counts as disconnected.
+    private readonly TimeSpan _deviceStaleAfter;
+
     public int ConnectedStationsCount => Math.Max(0, Volatile.Read(ref _connectedStations));
 
     public CentralStationService(
         IServiceScopeFactory scopeFactory,
         IAlertStateService alertState,
         IHubContext<VitalsHub> hubContext,
-        ILogger<CentralStationService> logger)
+        ILogger<CentralStationService> logger,
+        IOptions<CentralStationOptions> options)
     {
         _scopeFactory = scopeFactory;
         _alertState = alertState;
         _hubContext = hubContext;
         _logger = logger;
+        _deviceStaleAfter = TimeSpan.FromSeconds(Math.Max(1, options.Value.DeviceStaleAfterSeconds));
 
         SeedDefaultPatients();
     }
@@ -101,6 +219,7 @@ public sealed class CentralStationService : ICentralStationService
             _patientStates[id] = new PatientSimulationState
             {
                 PatientId = id,
+                IsSimulated = true,
                 BaseHeartRate = hr,
                 BaseSpO2 = spo2,
                 BaseSystolic = sys,
@@ -114,7 +233,7 @@ public sealed class CentralStationService : ICentralStationService
 
             var intSys = (int)Math.Round(sys);
             var intDia = (int)Math.Round(dia);
-            var initialVitals = new VitalsDto(
+            _latestVitals[id] = new VitalsDto(
                 HeartRate: (int)Math.Round(hr),
                 SpO2: (int)Math.Round(spo2),
                 Nibp: new BloodPressureDto(intSys, intDia, (intSys + 2 * intDia) / 3),
@@ -122,7 +241,6 @@ public sealed class CentralStationService : ICentralStationService
                 Temperature: Math.Round(temp, 1),
                 PulseRate: (int)Math.Round(hr)
             );
-            _latestVitals[id] = initialVitals;
         }
     }
 
@@ -137,6 +255,16 @@ public sealed class CentralStationService : ICentralStationService
         int next = 1;
         while (usedBeds.Contains(next)) next++;
         return next;
+    }
+
+    private bool IsBedOccupiedByOther(string patientId, int bedNumber) =>
+        _patients.Values.Any(p => p.PatientId != patientId && p.BedNumber == bedNumber);
+
+    private string NextFreePatientId()
+    {
+        var n = _patients.Count + 1;
+        while (_patients.ContainsKey($"P{n:D3}")) n++;
+        return $"P{n:D3}";
     }
 
     public void IncrementConnectedStations() => Interlocked.Increment(ref _connectedStations);
@@ -159,52 +287,35 @@ public sealed class CentralStationService : ICentralStationService
 
     public async Task<PatientInfoDto> CreatePatientAsync(PatientInfoDto dto, CancellationToken ct = default)
     {
-        var patientId = string.IsNullOrWhiteSpace(dto.PatientId)
-            ? $"P{_patients.Count + 1:D3}"
-            : dto.PatientId;
+        await EnsureDatabaseSyncedAsync(ct);
 
-        var bedNumber = GetNextUniqueBedNumber(dto.BedNumber);
-        var patientInfo = dto with { PatientId = patientId, BedNumber = bedNumber };
-        _patients[patientId] = patientInfo;
-
-        var hr = 72.0;
-        var spo2 = 98.0;
-        var sys = 120.0;
-        var dia = 80.0;
-        var rr = 16.0;
-        var temp = 36.6;
-
-        _patientStates[patientId] = new PatientSimulationState
+        PatientInfoDto patientInfo;
+        lock (_rosterLock)
         {
-            PatientId = patientId,
-            BaseHeartRate = hr,
-            BaseSpO2 = spo2,
-            BaseSystolic = sys,
-            BaseDiastolic = dia,
-            BaseRespRate = rr,
-            BaseTemperature = temp,
-            EcgPhase = Random.Shared.NextDouble(),
-            PlethPhase = Random.Shared.NextDouble(),
-            RespPhase = Random.Shared.NextDouble()
-        };
+            var patientId = string.IsNullOrWhiteSpace(dto.PatientId) ? NextFreePatientId() : dto.PatientId;
+            if (_patients.ContainsKey(patientId))
+                throw new CentralStationConflictException($"Patient '{patientId}' already exists.");
 
-        var initialVitals = new VitalsDto(
-            HeartRate: 72,
-            SpO2: 98,
-            Nibp: new BloodPressureDto(120, 80, 93),
-            RespiratoryRate: 16,
-            Temperature: 36.6,
-            PulseRate: 72
-        );
-        _latestVitals[patientId] = initialVitals;
+            if (IsBedOccupiedByOther(patientId, dto.BedNumber))
+                throw new CentralStationConflictException($"Bed {dto.BedNumber} is already occupied by another patient.");
 
-        var guid = DeterministicGuid(patientId);
-        _patientGuidMap[patientId] = guid;
+            var patientType = string.IsNullOrWhiteSpace(dto.PatientType) ? "Adu" : dto.PatientType;
+            patientInfo = dto with
+            {
+                PatientId = patientId,
+                PatientType = patientType
+            };
+            _patients[patientId] = patientInfo;
+            _patientGuidMap[patientId] = DeterministicGuid(patientId);
+
+            // A new bed gets no simulated or invented vitals: numbers appear only when a device reports them.
+        }
 
         try
         {
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var guid = DeterministicGuid(patientInfo.PatientId);
 
             var dbPatient = await db.Patients.FirstOrDefaultAsync(p => p.Id == guid, ct);
             if (dbPatient is null)
@@ -215,34 +326,53 @@ public sealed class CentralStationService : ICentralStationService
                     FullName = patientInfo.PatientName,
                     Bed = patientInfo.BedNumber.ToString(),
                     Ward = patientInfo.Diagnosis,
+                    PatientType = patientInfo.PatientType,
+                    StationPatientId = patientInfo.PatientId,
                     IsActive = true,
                     CreatedAt = DateTime.UtcNow
                 });
-                await db.SaveChangesAsync(ct);
             }
+            else
+            {
+                // A patient discharged earlier and registered again: the stored record becomes active with the new data.
+                dbPatient.FullName = patientInfo.PatientName;
+                dbPatient.Bed = patientInfo.BedNumber.ToString();
+                dbPatient.Ward = patientInfo.Diagnosis;
+                dbPatient.PatientType = patientInfo.PatientType;
+                dbPatient.StationPatientId = patientInfo.PatientId;
+                dbPatient.IsActive = true;
+            }
+
+            await db.SaveChangesAsync(ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Failed to persist new patient {PatientId} to database.", patientId);
+            _logger.LogWarning(ex, "Failed to persist new patient {PatientId} to database.", patientInfo.PatientId);
         }
 
         await _hubContext.Clients.All.SendAsync(HubMethods.PatientAdded, patientInfo, ct);
         _logger.LogInformation("Patient {PatientId} ({PatientName}) added to Central Station (Bed {Bed}).",
-            patientId, patientInfo.PatientName, patientInfo.BedNumber);
+            patientInfo.PatientId, patientInfo.PatientName, patientInfo.BedNumber);
 
         return patientInfo;
     }
 
     public async Task<PatientInfoDto?> UpdatePatientAsync(string patientId, PatientInfoDto dto, CancellationToken ct = default)
     {
-        if (!_patients.ContainsKey(patientId))
-        {
-            await EnsureDatabaseSyncedAsync(ct);
-            if (!_patients.ContainsKey(patientId)) return null;
-        }
+        await EnsureDatabaseSyncedAsync(ct);
 
-        var updated = dto with { PatientId = patientId };
-        _patients[patientId] = updated;
+        PatientInfoDto updated;
+        lock (_rosterLock)
+        {
+            if (!_patients.ContainsKey(patientId)) return null;
+
+            if (IsBedOccupiedByOther(patientId, dto.BedNumber))
+                throw new CentralStationConflictException($"Bed {dto.BedNumber} is already occupied by another patient.");
+
+            var patientType = string.IsNullOrWhiteSpace(dto.PatientType) ? "Adu" : dto.PatientType;
+            updated = dto with { PatientId = patientId, PatientType = patientType };
+            _patients[patientId] = updated;
+        }
 
         try
         {
@@ -256,10 +386,12 @@ public sealed class CentralStationService : ICentralStationService
                 dbPatient.FullName = updated.PatientName;
                 dbPatient.Bed = updated.BedNumber.ToString();
                 dbPatient.Ward = updated.Diagnosis;
+                dbPatient.PatientType = updated.PatientType;
+                dbPatient.StationPatientId = patientId;
                 await db.SaveChangesAsync(ct);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Failed to update patient {PatientId} in database.", patientId);
         }
@@ -270,20 +402,9 @@ public sealed class CentralStationService : ICentralStationService
 
     public async Task<bool> DeletePatientAsync(string patientId, CancellationToken ct = default)
     {
-        if (!_patients.TryRemove(patientId, out _))
-        {
-            await EnsureDatabaseSyncedAsync(ct);
-            if (!_patients.TryRemove(patientId, out _)) return false;
-        }
+        await EnsureDatabaseSyncedAsync(ct);
 
-        _latestVitals.TryRemove(patientId, out _);
-        _patientStates.TryRemove(patientId, out _);
-
-        var cleared = _alertState.ClearForPatient(patientId);
-        foreach (var alert in cleared)
-        {
-            await _hubContext.Clients.All.SendAsync(HubMethods.AlertCleared, alert, ct);
-        }
+        if (!await RemoveFromStationAsync(patientId, ct)) return false;
 
         try
         {
@@ -298,13 +419,40 @@ public sealed class CentralStationService : ICentralStationService
                 await db.SaveChangesAsync(ct);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Failed to deactivate patient {PatientId} in database.", patientId);
         }
 
-        await _hubContext.Clients.All.SendAsync(HubMethods.PatientRemoved, patientId, ct);
         _logger.LogInformation("Patient {PatientId} removed from Central Station.", patientId);
+        return true;
+    }
+
+    private async Task<bool> RemoveFromStationAsync(string patientId, CancellationToken ct)
+    {
+        IReadOnlyList<AlertDto> cleared;
+        List<AlertDto> deviceAlarms;
+        lock (_rosterLock)
+        {
+            if (!_patients.TryRemove(patientId, out _)) return false;
+
+            _latestVitals.TryRemove(patientId, out _);
+            _patientStates.TryRemove(patientId, out _);
+            cleared = _alertState.ClearForPatient(patientId);
+
+            deviceAlarms = _deviceAlarms.Values.Where(a => a.PatientId == patientId).ToList();
+            foreach (var alarm in deviceAlarms)
+            {
+                _deviceAlarms.TryRemove(alarm.AlertId, out _);
+            }
+        }
+
+        foreach (var alert in cleared.Concat(deviceAlarms))
+        {
+            await _hubContext.Clients.All.SendAsync(HubMethods.AlertCleared, alert, ct);
+        }
+
+        await _hubContext.Clients.All.SendAsync(HubMethods.PatientRemoved, patientId, ct);
         return true;
     }
 
@@ -312,268 +460,367 @@ public sealed class CentralStationService : ICentralStationService
         _latestVitals.GetValueOrDefault(patientId);
 
     public IReadOnlyList<AlertDto> GetActiveAlerts() =>
-        _alertState.GetActiveAlerts();
+        _alertState.GetActiveAlerts()
+            .Where(a => !_deviceAlarms.ContainsKey(a.AlertId))
+            .Concat(_deviceAlarms.Values)
+            .ToList();
 
     public async Task<AlertDto?> AcknowledgeAlertAsync(string alertId)
     {
-        var acknowledged = _alertState.Acknowledge(alertId);
-        if (acknowledged is null) return null;
+        if (_deviceAlarms.TryRemove(alertId, out var alarm))
+        {
+            // A device alarm is cleared by the clinician's acknowledgement on every station.
+            var acknowledged = alarm with { IsAcknowledged = true };
+            await _hubContext.Clients.All.SendAsync(HubMethods.AlertAcknowledged, acknowledged);
+            await _hubContext.Clients.All.SendAsync(HubMethods.AlertCleared, acknowledged);
+            _logger.LogInformation("Device alarm {AlertId} acknowledged and cleared.", alertId);
 
-        await _hubContext.Clients.All.SendAsync(HubMethods.AlertAcknowledged, acknowledged);
+            // The vitals may still breach the same limit; that calculated alert becomes visible again, as the stations see it.
+            var calculated = GetActiveAlerts().FirstOrDefault(a => a.AlertId == alertId);
+            if (calculated is not null)
+            {
+                await _hubContext.Clients.All.SendAsync(HubMethods.AlertTriggered, calculated);
+            }
+
+            return acknowledged;
+        }
+
+        // Every acknowledgement is announced to all stations, repeated ones too (as the reference VitalsHub does).
+        var acknowledgedAlert = _alertState.Acknowledge(alertId);
+        if (acknowledgedAlert is null) return null;
+
+        await _hubContext.Clients.All.SendAsync(HubMethods.AlertAcknowledged, acknowledgedAlert);
         _logger.LogInformation("Alert {AlertId} acknowledged.", alertId);
-        return acknowledged;
+        return acknowledgedAlert;
     }
 
-    public async Task ProcessTelemetryAsync(MonitorUpdateDto telemetry, CancellationToken ct = default)
+    public Task ProcessTelemetryAsync(MonitorUpdateDto telemetry, CancellationToken ct = default) =>
+        ProcessUpdateAsync(telemetry, patientType: null, ct);
+
+    // The gateway does not send the patient type. A device reading about a stored patient carries the stored type.
+    private async Task ProcessUpdateAsync(MonitorUpdateDto telemetry, string? patientType, CancellationToken ct)
     {
-        _latestVitals[telemetry.PatientId] = telemetry.Vitals;
+        if (telemetry.Vitals?.Nibp is null)
+            throw new ArgumentException("Vitals and vitals.nibp are required.", nameof(telemetry));
 
-        if (!_patients.TryGetValue(telemetry.PatientId, out var existingInfo))
+        var vitals = NormalizeGatewayVitals(telemetry.Vitals);
+        var now = DateTimeOffset.UtcNow;
+
+        PatientInfoDto roster;
+        PatientInfoDto? announce = null;
+        AlertChangeSet changes;
+
+        lock (_rosterLock)
         {
-            var bedNumber = GetNextUniqueBedNumber(telemetry.BedNumber);
-            existingInfo = new PatientInfoDto(
-                telemetry.PatientId,
-                telemetry.PatientName,
-                bedNumber,
-                null,
-                "Adu");
-            _patients[telemetry.PatientId] = existingInfo;
-            await _hubContext.Clients.All.SendAsync(HubMethods.PatientAdded, existingInfo, ct);
-        }
-
-        var state = _patientStates.GetOrAdd(telemetry.PatientId, id => new PatientSimulationState
-        {
-            PatientId = id,
-            BaseHeartRate = telemetry.Vitals.HeartRate,
-            BaseSpO2 = telemetry.Vitals.SpO2,
-            BaseSystolic = telemetry.Vitals.Nibp.Systolic,
-            BaseDiastolic = telemetry.Vitals.Nibp.Diastolic,
-            BaseRespRate = telemetry.Vitals.RespiratoryRate,
-            BaseTemperature = telemetry.Vitals.Temperature,
-            EcgPhase = Random.Shared.NextDouble(),
-            PlethPhase = Random.Shared.NextDouble(),
-            RespPhase = Random.Shared.NextDouble()
-        });
-
-        lock (state)
-        {
-            state.LastExternalVitals = telemetry.Vitals;
-            state.LastExternalRecordedAt = DateTimeOffset.UtcNow;
-            state.BaseHeartRate = telemetry.Vitals.HeartRate;
-            state.BaseSpO2 = telemetry.Vitals.SpO2;
-            state.BaseSystolic = telemetry.Vitals.Nibp.Systolic;
-            state.BaseDiastolic = telemetry.Vitals.Nibp.Diastolic;
-            state.BaseRespRate = telemetry.Vitals.RespiratoryRate;
-            state.BaseTemperature = telemetry.Vitals.Temperature;
-        }
-
-        await _hubContext.Clients.All.SendAsync(HubMethods.ReceiveVitals, telemetry, ct);
-
-        var changes = _alertState.Reconcile(telemetry.PatientId, telemetry.Vitals);
-        if (changes.HasChanges)
-        {
-            foreach (var raised in changes.Raised)
+            if (_patients.TryGetValue(telemetry.PatientId, out var existing))
             {
-                await _hubContext.Clients.All.SendAsync(HubMethods.AlertTriggered, raised, ct);
-                _logger.LogWarning("ALERT {Severity} — {PatientId}: {Message}", raised.Severity, raised.PatientId, raised.Message);
+                roster = existing;
+                if (patientType is not null && existing.PatientType != patientType)
+                {
+                    roster = existing with { PatientType = patientType };
+                    _patients[telemetry.PatientId] = roster;
+                    announce = roster;
+                }
+            }
+            else
+            {
+                roster = new PatientInfoDto(
+                    telemetry.PatientId,
+                    telemetry.PatientName,
+                    GetNextUniqueBedNumber(telemetry.BedNumber),
+                    null,
+                    patientType ?? "Adu");
+                _patients[telemetry.PatientId] = roster;
+                announce = roster;
             }
 
-            foreach (var cleared in changes.Cleared)
+            var state = _patientStates.GetOrAdd(telemetry.PatientId, id => new PatientSimulationState { PatientId = id });
+            if (state.IsStale)
             {
-                await _hubContext.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
-                _logger.LogInformation("Alert cleared — {PatientId}: {Vital}", cleared.PatientId, cleared.VitalSign);
+                state.IsStale = false;   // the monitor is back, so its card returns to the station
+                announce ??= roster;
             }
+
+            state.IsSimulated = false;   // a device reports this bed, so the simulator stops driving it
+            state.LastExternalVitals = vitals;
+            state.LastDeviceReadingAt = now;
+            state.Waveforms.Enqueue(telemetry.Waveforms);
+            _latestVitals[telemetry.PatientId] = vitals;
+
+            changes = ReconcileForStations(telemetry.PatientId, vitals);
         }
+
+        if (announce is not null)
+        {
+            await _hubContext.Clients.All.SendAsync(HubMethods.PatientAdded, announce, ct);
+        }
+
+        // The frame of an incoming batch carries the numbers only: its samples are played out on the ticks.
+        var frame = new MonitorUpdateDto(roster.PatientId, roster.PatientName, roster.BedNumber, vitals, EmptyWaveforms(), now);
+        await _hubContext.Clients.All.SendAsync(HubMethods.ReceiveVitals, frame, ct);
+        await BroadcastAlertChangesAsync(changes, ct);
     }
 
-    public async Task ProcessAlertAsync(AlertDto alert, CancellationToken ct = default)
+    public async Task<bool> ProcessAlertAsync(AlertDto alert, CancellationToken ct = default)
     {
-        await _hubContext.Clients.All.SendAsync(HubMethods.AlertTriggered, alert, ct);
+        await EnsureDatabaseSyncedAsync(ct);
+
+        AlertDto alarm;
+        lock (_rosterLock)
+        {
+            if (!_patients.ContainsKey(alert.PatientId)) return false;
+
+            // Same key as the evaluator uses: one alert per (patient, vital sign).
+            alarm = alert with
+            {
+                AlertId = AlertDto.BuildId(alert.PatientId, alert.VitalSign),
+                IsAcknowledged = false,
+                Timestamp = alert.Timestamp == default ? DateTimeOffset.UtcNow : alert.Timestamp
+            };
+
+            if (_deviceAlarms.TryGetValue(alarm.AlertId, out var current))
+            {
+                if (current.Severity == alarm.Severity && current.Message == alarm.Message) return true;
+                alarm = alarm with { Timestamp = current.Timestamp };
+            }
+
+            _deviceAlarms[alarm.AlertId] = alarm;
+        }
+
+        await _hubContext.Clients.All.SendAsync(HubMethods.AlertTriggered, alarm, ct);
+        _logger.LogWarning("Device alarm {Severity} — {PatientId}: {Message}", alarm.Severity, alarm.PatientId, alarm.Message);
+        return true;
     }
 
     public async Task ProcessVitalSignsRecordedAsync(Patient patient, VitalSign vitals, CancellationToken ct = default)
     {
-        var patientId = GetOrMapPatientId(patient);
-
-        if (!_patients.TryGetValue(patientId, out var existingInfo))
+        try
         {
-            var preferred = int.TryParse(patient.Bed, out var b) ? b : 0;
-            var bedNumber = GetNextUniqueBedNumber(preferred);
-            existingInfo = new PatientInfoDto(
-                patientId,
-                patient.FullName,
-                bedNumber,
-                patient.Ward,
-                "Adu");
-            _patients[patientId] = existingInfo;
-            await _hubContext.Clients.All.SendAsync(HubMethods.PatientAdded, existingInfo, ct);
+            var patientId = GetOrMapPatientId(patient);
+
+            VitalsDto? previous = null;
+            lock (_rosterLock)
+            {
+                if (_patientStates.TryGetValue(patientId, out var state))
+                    previous = state.LastExternalVitals;
+            }
+
+            // A reading may omit some values. Gaps are filled only from earlier device readings;
+            // if a complete set is still missing, nothing is shown rather than invented numbers.
+            var merged = MergeDeviceReading(vitals, previous);
+            if (merged is null)
+            {
+                _logger.LogWarning("Incomplete reading for {PatientId} and no earlier device values to complete it; not shown on the station.", patientId);
+                return;
+            }
+
+            var update = new MonitorUpdateDto(
+                PatientId: patientId,
+                PatientName: patient.FullName,
+                BedNumber: int.TryParse(patient.Bed, out var bed) ? bed : 0,
+                Vitals: merged,
+                Waveforms: EmptyWaveforms(),   // no synthetic traces for device data
+                Timestamp: DateTimeOffset.UtcNow);
+
+            await ProcessUpdateAsync(update, patient.PatientType, ct);
         }
-
-        var hr = vitals.HeartRate ?? 75;
-        var spo2 = (int)Math.Round(vitals.OxygenSaturation ?? 98.0);
-        var sys = vitals.SystolicBloodPressure ?? 120;
-        var dia = vitals.DiastolicBloodPressure ?? 80;
-        var map = (sys + 2 * dia) / 3;
-        var rr = vitals.RespiratoryRate ?? 16;
-        var temp = Math.Round(vitals.Temperature ?? 36.6, 1);
-        var pulse = hr;
-
-        var vitalsDto = new VitalsDto(
-            HeartRate: hr,
-            SpO2: spo2,
-            Nibp: new BloodPressureDto(sys, dia, map),
-            RespiratoryRate: rr,
-            Temperature: temp,
-            PulseRate: pulse
-        );
-
-        _latestVitals[patientId] = vitalsDto;
-
-        var state = _patientStates.GetOrAdd(patientId, id => new PatientSimulationState
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            PatientId = id,
-            BaseHeartRate = hr,
-            BaseSpO2 = spo2,
-            BaseSystolic = sys,
-            BaseDiastolic = dia,
-            BaseRespRate = rr,
-            BaseTemperature = temp,
-            EcgPhase = Random.Shared.NextDouble(),
-            PlethPhase = Random.Shared.NextDouble(),
-            RespPhase = Random.Shared.NextDouble()
-        });
-
-        lock (state)
-        {
-            state.LastExternalVitals = vitalsDto;
-            state.LastExternalRecordedAt = DateTimeOffset.UtcNow;
-            state.BaseHeartRate = hr;
-            state.BaseSpO2 = spo2;
-            state.BaseSystolic = sys;
-            state.BaseDiastolic = dia;
-            state.BaseRespRate = rr;
-            state.BaseTemperature = temp;
+            _logger.LogError(ex, "Failed to forward a recorded reading of patient {PatientId} to the Central Station.", patient.Id);
         }
-
-        var ecgSamples = new float[GeneratorSettings.EcgSamplesPerUpdate];
-        var plethSamples = new float[GeneratorSettings.SlowSamplesPerUpdate];
-        var respSamples = new float[GeneratorSettings.SlowSamplesPerUpdate];
-
-        state.EcgPhase = WaveformSynthesizer.Fill(ecgSamples, WaveformType.ECG_II, state.EcgPhase, hr, WaveformSynthesizer.EcgSampleRate);
-        state.PlethPhase = WaveformSynthesizer.Fill(plethSamples, WaveformType.Pleth, state.PlethPhase, pulse, WaveformSynthesizer.SlowSampleRate);
-        state.RespPhase = WaveformSynthesizer.Fill(respSamples, WaveformType.Respiration, state.RespPhase, rr, WaveformSynthesizer.SlowSampleRate);
-
-        var waveforms = new WaveformSampleDto[]
-        {
-            new(WaveformType.ECG_II, ecgSamples, WaveformSynthesizer.EcgSampleRate),
-            new(WaveformType.Pleth, plethSamples, WaveformSynthesizer.SlowSampleRate),
-            new(WaveformType.Respiration, respSamples, WaveformSynthesizer.SlowSampleRate)
-        };
-
-        var update = new MonitorUpdateDto(
-            PatientId: patientId,
-            PatientName: patient.FullName,
-            BedNumber: existingInfo.BedNumber,
-            Vitals: vitalsDto,
-            Waveforms: waveforms,
-            Timestamp: DateTimeOffset.UtcNow
-        );
-
-        await ProcessTelemetryAsync(update, ct);
     }
 
-    public async Task PublishTickAsync(CancellationToken ct = default)
+    public async Task SyncPatientAsync(Patient patient, CancellationToken ct = default)
     {
-        await EnsureDatabaseSyncedAsync(ct);
-
-        var patientsList = _patients.Values.ToList();
-        foreach (var patient in patientsList)
+        try
         {
-            if (ct.IsCancellationRequested) break;
-
-            var state = _patientStates.GetOrAdd(patient.PatientId, id =>
+            var patientId = GetOrMapPatientId(patient);
+            if (!patient.IsActive)
             {
-                var existingVitals = _latestVitals.GetValueOrDefault(id);
-                var hr = existingVitals?.HeartRate ?? (65 + Random.Shared.NextDouble() * 25);
-                var spo2 = existingVitals?.SpO2 ?? (96 + Random.Shared.NextDouble() * 3);
-                var sys = existingVitals?.Nibp.Systolic ?? (115 + Random.Shared.NextDouble() * 15);
-                var dia = existingVitals?.Nibp.Diastolic ?? (75 + Random.Shared.NextDouble() * 10);
-                var rr = existingVitals?.RespiratoryRate ?? (14 + Random.Shared.NextDouble() * 5);
-                var temp = existingVitals?.Temperature ?? (36.4 + Random.Shared.NextDouble() * 0.6);
+                await RemoveFromStationAsync(patientId, ct);
+                return;
+            }
 
-                return new PatientSimulationState
-                {
-                    PatientId = id,
-                    BaseHeartRate = hr,
-                    BaseSpO2 = spo2,
-                    BaseSystolic = sys,
-                    BaseDiastolic = dia,
-                    BaseRespRate = rr,
-                    BaseTemperature = temp,
-                    EcgPhase = Random.Shared.NextDouble(),
-                    PlethPhase = Random.Shared.NextDouble(),
-                    RespPhase = Random.Shared.NextDouble()
-                };
-            });
-
-            VitalsDto vitals;
-            WaveformSampleDto[] waveforms;
-
-            lock (state)
+            PatientInfoDto info;
+            lock (_rosterLock)
             {
-                // If real external vitals were supplied within the last 40 seconds, use them with subtle live jitter
-                if (state.LastExternalVitals is not null &&
-                    state.LastExternalRecordedAt.HasValue &&
-                    DateTimeOffset.UtcNow - state.LastExternalRecordedAt.Value < TimeSpan.FromSeconds(40))
+                var preferredBed = int.TryParse(patient.Bed, out var bed) ? bed : 0;
+                if (_patients.TryGetValue(patientId, out var current))
                 {
-                    var ext = state.LastExternalVitals;
-                    var jitterHr = Math.Clamp(ext.HeartRate + Jitter(0.6), 25, 220);
-                    var pulse = (int)Math.Round(Math.Clamp(jitterHr + Jitter(0.4), 25, 220));
-
-                    vitals = ext with
+                    var bedNumber = preferredBed > 0 && !IsBedOccupiedByOther(patientId, preferredBed)
+                        ? preferredBed
+                        : current.BedNumber;
+                    info = current with
                     {
-                        HeartRate = (int)Math.Round(jitterHr),
-                        PulseRate = pulse
+                        PatientName = patient.FullName,
+                        BedNumber = bedNumber,
+                        Diagnosis = patient.Ward,
+                        PatientType = patient.PatientType
                     };
                 }
                 else
                 {
-                    // Gentle physiological drift around baseline
+                    info = new PatientInfoDto(patientId, patient.FullName, GetNextUniqueBedNumber(preferredBed), patient.Ward, patient.PatientType);
+                }
+
+                _patients[patientId] = info;
+                _patientStates.TryAdd(patientId, new PatientSimulationState { PatientId = patientId });
+            }
+
+            await _hubContext.Clients.All.SendAsync(HubMethods.PatientAdded, info, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to sync patient {PatientId} with the Central Station.", patient.Id);
+        }
+    }
+
+    public async Task PublishTickAsync(CancellationToken ct = default)
+    {
+        if (!_databaseSynced) _ = EnsureDatabaseSyncedAsync(CancellationToken.None);
+
+        var now = DateTimeOffset.UtcNow;
+        var frames = new List<(MonitorUpdateDto Update, AlertChangeSet Changes)>();
+        var silentBeds = new List<(string PatientId, IReadOnlyList<AlertDto> Cleared)>();
+
+        lock (_rosterLock)
+        {
+            foreach (var patient in _patients.Values.ToList())
+            {
+                if (!_patientStates.TryGetValue(patient.PatientId, out var state)) continue;
+
+                VitalsDto vitals;
+                WaveformSampleDto[] waveforms;
+
+                if (state.IsSimulated)
+                {
+                    // Demo bed: gentle drift around its baseline, with occasional episodes.
                     DriftBaselines(state);
                     AdvanceEpisode(state);
                     vitals = ComposeVitals(state);
+                    waveforms = ComposeWaveforms(state, vitals);
+                }
+                else if (state.LastExternalVitals is { } device)
+                {
+                    if (now - state.LastDeviceReadingAt > _deviceStaleAfter)
+                    {
+                        // The monitor has gone silent. Its last numbers must not keep arriving with a fresh timestamp.
+                        if (!state.IsStale)
+                        {
+                            state.IsStale = true;
+                            state.Waveforms.Clear();
+                            silentBeds.Add((patient.PatientId, _alertState.ClearForPatient(patient.PatientId)));
+                        }
+
+                        continue;
+                    }
+
+                    // Device bed: the device's own numbers, with the samples the gateway sent for this tick.
+                    vitals = device;
+                    waveforms = state.Waveforms.Take();
+                }
+                else
+                {
+                    // Bed without any data yet: nothing to show.
+                    continue;
                 }
 
                 _latestVitals[patient.PatientId] = vitals;
-                waveforms = ComposeWaveforms(state, vitals);
-            }
+                var changes = ReconcileForStations(patient.PatientId, vitals);
 
-            var update = new MonitorUpdateDto(
-                PatientId: patient.PatientId,
-                PatientName: patient.PatientName,
-                BedNumber: patient.BedNumber,
-                Vitals: vitals,
-                Waveforms: waveforms,
-                Timestamp: DateTimeOffset.UtcNow
-            );
-
-            await _hubContext.Clients.All.SendAsync(HubMethods.ReceiveVitals, update, ct);
-
-            var changes = _alertState.Reconcile(patient.PatientId, vitals);
-            if (changes.HasChanges)
-            {
-                foreach (var raised in changes.Raised)
-                {
-                    await _hubContext.Clients.All.SendAsync(HubMethods.AlertTriggered, raised, ct);
-                    _logger.LogWarning("ALERT {Severity} — {PatientId}: {Message}", raised.Severity, raised.PatientId, raised.Message);
-                }
-                foreach (var cleared in changes.Cleared)
-                {
-                    await _hubContext.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
-                    _logger.LogInformation("Alert cleared — {PatientId}: {Vital}", cleared.PatientId, cleared.VitalSign);
-                }
+                frames.Add((new MonitorUpdateDto(
+                    PatientId: patient.PatientId,
+                    PatientName: patient.PatientName,
+                    BedNumber: patient.BedNumber,
+                    Vitals: vitals,
+                    Waveforms: waveforms,
+                    Timestamp: DateTimeOffset.UtcNow), changes));
             }
         }
+
+        foreach (var (patientId, cleared) in silentBeds)
+        {
+            foreach (var alert in cleared)
+            {
+                await _hubContext.Clients.All.SendAsync(HubMethods.AlertCleared, alert, ct);
+            }
+
+            await _hubContext.Clients.All.SendAsync(HubMethods.PatientRemoved, patientId, ct);
+            _logger.LogWarning(
+                "No reading from the monitor of patient {PatientId} for {Seconds} s; its card is removed from the station.",
+                patientId, _deviceStaleAfter.TotalSeconds);
+        }
+
+        foreach (var (update, changes) in frames)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            await _hubContext.Clients.All.SendAsync(HubMethods.ReceiveVitals, update, ct);
+            await BroadcastAlertChangesAsync(changes, ct);
+        }
+    }
+
+    // Runs the evaluator for one patient and returns the transitions the stations must see. As in the reference
+    // (IAlertStateService, HubMethods.AlertTriggered): a new breach or a severity change is announced; a continuing
+    // breach, including a change of direction at the same severity, is refreshed silently.
+    private AlertChangeSet ReconcileForStations(string patientId, VitalsDto vitals) =>
+        _alertState.Reconcile(patientId, vitals);
+
+    private async Task BroadcastAlertChangesAsync(AlertChangeSet changes, CancellationToken ct)
+    {
+        // A device alarm owns its key until a clinician acknowledges it; calculated transitions for that key stay hidden.
+        foreach (var raised in changes.Raised.Where(a => !_deviceAlarms.ContainsKey(a.AlertId)))
+        {
+            await _hubContext.Clients.All.SendAsync(HubMethods.AlertTriggered, raised, ct);
+            _logger.LogWarning("ALERT {Severity} — {PatientId}: {Message}", raised.Severity, raised.PatientId, raised.Message);
+        }
+
+        foreach (var cleared in changes.Cleared.Where(a => !_deviceAlarms.ContainsKey(a.AlertId)))
+        {
+            await _hubContext.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
+            _logger.LogInformation("Alert cleared — {PatientId}: {Vital}", cleared.PatientId, cleared.VitalSign);
+        }
+    }
+
+    /// <summary>Gateway numbers follow the contract's formulas: MAP from the cuff values, temperature to one decimal.</summary>
+    private static VitalsDto NormalizeGatewayVitals(VitalsDto vitals)
+    {
+        var cuff = vitals.Nibp;
+        return vitals with
+        {
+            Nibp = new BloodPressureDto(cuff.Systolic, cuff.Diastolic, (cuff.Systolic + 2 * cuff.Diastolic) / 3),
+            Temperature = Math.Round(vitals.Temperature, 1)
+        };
+    }
+
+    private static WaveformSampleDto[] EmptyWaveforms() =>
+    [
+        new WaveformSampleDto(WaveformType.ECG_II, Array.Empty<float>(), WaveformSynthesizer.EcgSampleRate),
+        new WaveformSampleDto(WaveformType.Pleth, Array.Empty<float>(), WaveformSynthesizer.SlowSampleRate),
+        new WaveformSampleDto(WaveformType.Respiration, Array.Empty<float>(), WaveformSynthesizer.SlowSampleRate)
+    ];
+
+    /// <summary>Completes a device reading from earlier device values. Returns null while values are still missing.</summary>
+    private static VitalsDto? MergeDeviceReading(VitalSign reading, VitalsDto? previous)
+    {
+        var hr = reading.HeartRate ?? previous?.HeartRate;
+        var spo2 = reading.OxygenSaturation is { } o ? (int?)(int)Math.Round(o) : previous?.SpO2;
+        var sys = reading.SystolicBloodPressure ?? previous?.Nibp.Systolic;
+        var dia = reading.DiastolicBloodPressure ?? previous?.Nibp.Diastolic;
+        var rr = reading.RespiratoryRate ?? previous?.RespiratoryRate;
+        var temp = reading.Temperature is { } t ? (double?)Math.Round(t, 1) : previous?.Temperature;
+
+        if (hr is null || spo2 is null || sys is null || dia is null || rr is null || temp is null)
+            return null;
+
+        var map = (sys.Value + 2 * dia.Value) / 3;
+        return new VitalsDto(
+            HeartRate: hr.Value,
+            SpO2: spo2.Value,
+            Nibp: new BloodPressureDto(sys.Value, dia.Value, map),
+            RespiratoryRate: rr.Value,
+            Temperature: temp.Value,
+            PulseRate: hr.Value);   // no separate pulse-oximeter reading: heart rate is the best available
     }
 
     private static void DriftBaselines(PatientSimulationState state)
@@ -660,6 +907,10 @@ public sealed class CentralStationService : ICentralStationService
         var pleth = new float[GeneratorSettings.SlowSamplesPerUpdate];
         state.PlethPhase = WaveformSynthesizer.Fill(
             pleth, WaveformType.Pleth, state.PlethPhase, vitals.PulseRate, WaveformSynthesizer.SlowSampleRate);
+        for (var i = 0; i < pleth.Length; i++)
+        {
+            pleth[i] += PlethBaselineCorrection;
+        }
 
         var resp = new float[GeneratorSettings.SlowSamplesPerUpdate];
         state.RespPhase = WaveformSynthesizer.Fill(
@@ -677,6 +928,12 @@ public sealed class CentralStationService : ICentralStationService
 
     private string GetOrMapPatientId(Patient patient)
     {
+        if (!string.IsNullOrWhiteSpace(patient.StationPatientId))
+        {
+            _patientGuidMap[patient.StationPatientId] = patient.Id;
+            return patient.StationPatientId;
+        }
+
         foreach (var (key, guid) in _patientGuidMap)
         {
             if (guid == patient.Id) return key;
@@ -689,14 +946,15 @@ public sealed class CentralStationService : ICentralStationService
 
     private async Task EnsureDatabaseSyncedAsync(CancellationToken ct)
     {
-        if (_databaseSynced) return;
+        if (_databaseSynced || DateTimeOffset.UtcNow < _nextSyncAttempt) return;
 
         await _syncLock.WaitAsync(ct);
         try
         {
-            if (_databaseSynced) return;
-            await SyncFromDatabaseAsync(ct);
-            _databaseSynced = true;
+            if (_databaseSynced || DateTimeOffset.UtcNow < _nextSyncAttempt) return;
+
+            _databaseSynced = await SyncFromDatabaseAsync(ct);
+            if (!_databaseSynced) _nextSyncAttempt = DateTimeOffset.UtcNow.AddSeconds(30);
         }
         finally
         {
@@ -704,7 +962,7 @@ public sealed class CentralStationService : ICentralStationService
         }
     }
 
-    private async Task SyncFromDatabaseAsync(CancellationToken ct)
+    private async Task<bool> SyncFromDatabaseAsync(CancellationToken ct)
     {
         try
         {
@@ -717,84 +975,57 @@ public sealed class CentralStationService : ICentralStationService
                 .OrderBy(p => p.CreatedAt)
                 .ToListAsync(ct);
 
-            if (dbPatients.Count > 0)
+            var patientGuids = dbPatients.Select(p => p.Id).ToList();
+            var latestByPatient = new Dictionary<Guid, VitalSign>();
+            if (patientGuids.Count > 0)
             {
-                var patientGuids = dbPatients.Select(p => p.Id).ToList();
                 var vitalsList = await db.VitalSigns
                     .AsNoTracking()
                     .Where(v => patientGuids.Contains(v.PatientId))
                     .OrderBy(v => v.RecordedAt)
                     .ToListAsync(ct);
 
-                var latestVitalsByPatient = vitalsList
-                    .GroupBy(v => v.PatientId)
-                    .ToDictionary(g => g.Key, g => g.Last());
+                foreach (var reading in vitalsList)
+                {
+                    latestByPatient[reading.PatientId] = reading;   // oldest first, so the newest wins
+                }
+            }
 
+            lock (_rosterLock)
+            {
                 foreach (var p in dbPatients)
                 {
                     var id = GetOrMapPatientId(p);
-                    if (!_patients.TryGetValue(id, out var existingInfo))
+                    if (!_patients.TryGetValue(id, out var roster))
                     {
-                        var preferred = int.TryParse(p.Bed, out var b) ? b : 0;
-                        var bedNumber = GetNextUniqueBedNumber(preferred);
-                        existingInfo = new PatientInfoDto(id, p.FullName, bedNumber, p.Ward, "Adu");
-                        _patients[id] = existingInfo;
+                        var preferred = int.TryParse(p.Bed, out var bed) ? bed : 0;
+                        _patients[id] = new PatientInfoDto(id, p.FullName, GetNextUniqueBedNumber(preferred), p.Ward, p.PatientType);
+                    }
+                    else if (roster.PatientType != p.PatientType)
+                    {
+                        _patients[id] = roster with { PatientType = p.PatientType };   // the stored type is authoritative
                     }
 
-                    if (latestVitalsByPatient.TryGetValue(p.Id, out var v))
+                    var state = _patientStates.GetOrAdd(id, _ => new PatientSimulationState { PatientId = id });
+
+                    // Only a complete latest reading is restored; gaps are never filled with invented values.
+                    if (latestByPatient.TryGetValue(p.Id, out var latest) && MergeDeviceReading(latest, null) is { } vitals)
                     {
-                        var hr = v.HeartRate ?? 75;
-                        var spo2 = (int)Math.Round(v.OxygenSaturation ?? 98.0);
-                        var sys = v.SystolicBloodPressure ?? 120;
-                        var dia = v.DiastolicBloodPressure ?? 80;
-                        var map = ((int)sys + 2 * (int)dia) / 3;
-                        var rr = v.RespiratoryRate ?? 16;
-                        var temp = Math.Round(v.Temperature ?? 36.6, 1);
-
-                        var vitalsDto = new VitalsDto(
-                            HeartRate: (int)hr,
-                            SpO2: (int)spo2,
-                            Nibp: new BloodPressureDto((int)sys, (int)dia, map),
-                            RespiratoryRate: (int)rr,
-                            Temperature: temp,
-                            PulseRate: (int)hr
-                        );
-
-                        _latestVitals[id] = vitalsDto;
-                        _alertState.Reconcile(id, vitalsDto);
-
-                        var state = _patientStates.GetOrAdd(id, _ => new PatientSimulationState
-                        {
-                            PatientId = id,
-                            BaseHeartRate = hr,
-                            BaseSpO2 = spo2,
-                            BaseSystolic = sys,
-                            BaseDiastolic = dia,
-                            BaseRespRate = rr,
-                            BaseTemperature = temp,
-                            EcgPhase = Random.Shared.NextDouble(),
-                            PlethPhase = Random.Shared.NextDouble(),
-                            RespPhase = Random.Shared.NextDouble()
-                        });
-
-                        lock (state)
-                        {
-                            state.LastExternalVitals = vitalsDto;
-                            state.LastExternalRecordedAt = v.RecordedAt;
-                            state.BaseHeartRate = hr;
-                            state.BaseSpO2 = spo2;
-                            state.BaseSystolic = sys;
-                            state.BaseDiastolic = dia;
-                            state.BaseRespRate = rr;
-                            state.BaseTemperature = temp;
-                        }
+                        state.IsSimulated = false;
+                        state.LastExternalVitals = vitals;
+                        state.LastDeviceReadingAt = new DateTimeOffset(DateTime.SpecifyKind(latest.RecordedAt, DateTimeKind.Utc));
+                        _latestVitals[id] = vitals;
+                        _alertState.Reconcile(id, vitals);
                     }
                 }
             }
+
+            return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Database sync of patients encountered an issue.");
+            _logger.LogWarning(ex, "Database sync of patients failed; it will be retried.");
+            return false;
         }
     }
 

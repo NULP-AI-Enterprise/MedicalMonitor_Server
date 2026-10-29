@@ -16,6 +16,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(p => p.FullName).HasMaxLength(200).IsRequired();
             entity.Property(p => p.Ward).HasMaxLength(50);
             entity.Property(p => p.Bed).HasMaxLength(20);
+            entity.Property(p => p.PatientType).HasMaxLength(3).IsRequired().HasDefaultValue("Adu");
+            entity.Property(p => p.StationPatientId).HasMaxLength(64);
             entity.HasIndex(p => p.IsActive);
 
             entity.HasMany(p => p.VitalSigns)

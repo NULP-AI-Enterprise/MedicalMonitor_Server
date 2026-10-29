@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="FastEndpoints" Version="8.3.0" />
+    <PackageReference Include="FastEndpoints.Swagger" Version="8.3.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.11" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
@@ -26,6 +27,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\MedicalMonitor_Desktop\src\Monitoring.Shared\Monitoring.Shared.csproj" />
     <ProjectReference Include="..\..\MedicalMonitor_Desktop\src\Monitoring.BL\Monitoring.BL.csproj" />
+    <ProjectReference Include="..\..\MedicalMonitorServer\MedicalMonitorServer.Contracts\MedicalMonitorServer.Contracts.csproj" />
+    <ProjectReference Include="..\..\MedicalMonitorServer\MedicalMonitorServer.DeviceDriver\MedicalMonitorServer.DeviceDriver.csproj" />
   </ItemGroup>
 
 </Project>

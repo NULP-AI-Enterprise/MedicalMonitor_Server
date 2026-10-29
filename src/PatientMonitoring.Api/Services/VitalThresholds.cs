@@ -3,8 +3,9 @@ using PatientMonitoring.Api.Models;
 namespace PatientMonitoring.Api.Services;
 
 /// <summary>
-/// Пороги норми для показників. Значення за замовчуванням можна перевизначити
-/// в секції "VitalThresholds" файлу appsettings.json.
+/// Пороги норми для показників. Значення — фіксовані клінічні пороги контракту
+/// (Monitoring.Shared.VitalThresholds), ті самі, що використовує станція. Їх не перевизначають через
+/// appsettings.json, щоб старий API і станція не давали різних тривог для одних і тих самих даних.
 /// </summary>
 public sealed class VitalThresholds
 {
@@ -12,32 +13,48 @@ public sealed class VitalThresholds
 
     public ThresholdRange HeartRate { get; set; } = new()
     {
-        CriticalLow = 40, WarningLow = 50, WarningHigh = 110, CriticalHigh = 130
+        CriticalLow = Monitoring.Shared.VitalThresholds.HeartRateCriticalLow,
+        WarningLow = Monitoring.Shared.VitalThresholds.HeartRateWarningLow,
+        WarningHigh = Monitoring.Shared.VitalThresholds.HeartRateWarningHigh,
+        CriticalHigh = Monitoring.Shared.VitalThresholds.HeartRateCriticalHigh
     };
 
     public ThresholdRange SystolicBloodPressure { get; set; } = new()
     {
-        CriticalLow = 80, WarningLow = 90, WarningHigh = 140, CriticalHigh = 180
+        CriticalLow = Monitoring.Shared.VitalThresholds.SystolicCriticalLow,
+        WarningLow = Monitoring.Shared.VitalThresholds.SystolicWarningLow,
+        WarningHigh = Monitoring.Shared.VitalThresholds.SystolicWarningHigh,
+        CriticalHigh = Monitoring.Shared.VitalThresholds.SystolicCriticalHigh
     };
 
     public ThresholdRange DiastolicBloodPressure { get; set; } = new()
     {
-        CriticalLow = 40, WarningLow = 60, WarningHigh = 90, CriticalHigh = 120
+        CriticalLow = Monitoring.Shared.VitalThresholds.DiastolicCriticalLow,
+        WarningLow = Monitoring.Shared.VitalThresholds.DiastolicWarningLow,
+        WarningHigh = Monitoring.Shared.VitalThresholds.DiastolicWarningHigh,
+        CriticalHigh = Monitoring.Shared.VitalThresholds.DiastolicCriticalHigh
     };
 
     public ThresholdRange OxygenSaturation { get; set; } = new()
     {
-        CriticalLow = 88, WarningLow = 92
+        CriticalLow = Monitoring.Shared.VitalThresholds.SpO2CriticalLow,
+        WarningLow = Monitoring.Shared.VitalThresholds.SpO2WarningLow
     };
 
     public ThresholdRange Temperature { get; set; } = new()
     {
-        CriticalLow = 35.0, WarningLow = 36.0, WarningHigh = 38.0, CriticalHigh = 39.5
+        CriticalLow = Monitoring.Shared.VitalThresholds.TempCriticalLow,
+        WarningLow = Monitoring.Shared.VitalThresholds.TempWarningLow,
+        WarningHigh = Monitoring.Shared.VitalThresholds.TempWarningHigh,
+        CriticalHigh = Monitoring.Shared.VitalThresholds.TempCriticalHigh
     };
 
     public ThresholdRange RespiratoryRate { get; set; } = new()
     {
-        CriticalLow = 8, WarningLow = 12, WarningHigh = 20, CriticalHigh = 30
+        CriticalLow = Monitoring.Shared.VitalThresholds.RespRateCriticalLow,
+        WarningLow = Monitoring.Shared.VitalThresholds.RespRateWarningLow,
+        WarningHigh = Monitoring.Shared.VitalThresholds.RespRateWarningHigh,
+        CriticalHigh = Monitoring.Shared.VitalThresholds.RespRateCriticalHigh
     };
 }
 

@@ -39,7 +39,7 @@ public class VitalSignsAnalyzerTests
     [Fact]
     public void Analyze_WhenHeartRateExceedsWarning_ReturnsWarning()
     {
-        // Arrange (Threshold: WarningHigh = 110, CriticalHigh = 130)
+        // Arrange (Threshold: WarningHigh = 110, CriticalHigh = 150)
         var vitals = new VitalSign { HeartRate = 115 };
 
         // Act
@@ -55,8 +55,8 @@ public class VitalSignsAnalyzerTests
     [Fact]
     public void Analyze_WhenHeartRateExceedsCritical_ReturnsCritical()
     {
-        // Arrange
-        var vitals = new VitalSign { HeartRate = 135 };
+        // Arrange (CriticalHigh = 150)
+        var vitals = new VitalSign { HeartRate = 155 };
 
         // Act
         var result = _analyzer.Analyze(vitals);
@@ -88,8 +88,8 @@ public class VitalSignsAnalyzerTests
         // Arrange: Warning on HeartRate, Critical on Temperature
         var vitals = new VitalSign
         {
-            HeartRate = 115,          // Warning
-            Temperature = 40.0         // Critical (> 39.5)
+            HeartRate = 115,           // Warning
+            Temperature = 40.0         // Critical (> 39.0)
         };
 
         // Act
