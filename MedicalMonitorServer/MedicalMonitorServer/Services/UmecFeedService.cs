@@ -76,23 +76,101 @@ public sealed class UmecFeedService : BackgroundService
             await _pipeline.UpsertPatientAsync(ToPatientDto(info), ct);
         }
 
-        var vitals = message.Oru?.Vitals;
-        if (vitals is null || vitals.Count == 0) return;
+        var oru = message.Oru;
+        if (oru is null) return;
 
-        var readings = ToReadings(vitals);
+        // Only the patient-info message carries a PID; vitals (503), alarms (54/56) and waveform
+        // channels (160/161) do not. Fall back to the only patient on the roster; with several
+        // patients the owner is ambiguous.
+        string? Owner() => patientId ??= SingleKnownPatientId();
+
+        if (oru.WaveChannels.Count > 0 && Owner() is { } waveOwner)
+        {
+            _patients.UpdateWaveformChannels(waveOwner, oru.WaveChannels.Select(ToChannelDto));
+        }
+
+        // Msg 54 / 56 list every alarm of that category active right now; an empty list means none.
+        var category = message.Kind switch
+        {
+            UmecMessageKind.PhysiologicalAlarms => AlertCategory.Physiological,
+            UmecMessageKind.TechnicalAlarms => AlertCategory.Technical,
+            _ => (AlertCategory?)null,
+        };
+        if (category is { } c)
+        {
+            if (Owner() is { } alarmOwner)
+            {
+                var active = oru.Alarms
+                    .Where(a => a.AlarmId != 0)
+                    .Select(a => ToAlertDto(alarmOwner, a, c))
+                    .ToList();
+                await _pipeline.IngestDeviceAlarmsAsync(alarmOwner, c, active, ct);
+            }
+            else
+            {
+                _logger.LogDebug("Alarm message {MessageId} dropped: patient unknown.", message.MessageId);
+            }
+        }
+
+        if (oru.Vitals.Count == 0) return;
+
+        var readings = ToReadings(oru.Vitals);
         if (readings == new VitalReadings()) return;
 
-        // Vitals messages normally repeat the PID segment. If this one did not, fall back to
-        // the only patient on the roster; with several patients the owner is ambiguous.
-        patientId ??= SingleKnownPatientId();
-        if (patientId is null)
+        if (Owner() is not { } vitalsOwner)
         {
             _logger.LogDebug("Vitals message {MessageId} dropped: patient unknown.", message.MessageId);
             return;
         }
 
-        await _pipeline.IngestReadingsAsync(patientId, readings, null, DateTimeOffset.UtcNow, ct);
+        await _pipeline.IngestReadingsAsync(vitalsOwner, readings, null, DateTimeOffset.UtcNow, ct);
     }
+
+    private static AlertDto ToAlertDto(string patientId, ActiveAlarm alarm, AlertCategory category)
+    {
+        DeviceAlarmLevel? level = alarm.Level switch
+        {
+            AlarmLevel.High => DeviceAlarmLevel.High,
+            AlarmLevel.Medium => DeviceAlarmLevel.Medium,
+            AlarmLevel.Low => DeviceAlarmLevel.Low,
+            _ => null,
+        };
+
+        return new AlertDto(
+            AlertDto.BuildDeviceId(patientId, alarm.AlarmId),
+            patientId,
+            VitalSign: null,
+            AlertDto.SeverityOf(level),
+            string.IsNullOrWhiteSpace(alarm.Text) ? $"Device alarm {alarm.AlarmId}" : alarm.Text,
+            Value: null,
+            DateTimeOffset.UtcNow,
+            Source: AlertSource.Device,
+            Code: alarm.AlarmId,
+            Level: level,
+            Category: category);
+    }
+
+    private static WaveformChannelDto ToChannelDto(WaveChannel c) => new(
+        c.ChannelId,
+        c.ChannelId switch
+        {
+            1151 => WaveformType.Respiration,
+            1152 => WaveformType.Pleth,
+            >= 1100 and < 1150 => c.Label switch
+            {
+                "II" => WaveformType.ECG_II,
+                "I" => WaveformType.ECG_I,
+                _ => null,
+            },
+            _ => null,
+        },
+        c.Label,
+        c.Scale,
+        c.ScaleUnit,
+        c.Baseline,
+        c.Levels,
+        c.MinSample,
+        c.MaxSample);
 
     private string? SingleKnownPatientId()
     {
