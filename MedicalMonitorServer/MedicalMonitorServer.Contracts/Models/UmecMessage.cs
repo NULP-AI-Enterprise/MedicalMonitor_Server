@@ -103,6 +103,9 @@ public sealed class UmecVitalsMessage
 
     public AlarmSystemStatus? AlarmSystem { get; set; }
 
+    /// <summary>Waveform channel descriptors (OBX 2153). The HL7 stream carries no samples, only these.</summary>
+    public List<WaveChannel> WaveChannels { get; set; } = new();
+
     public List<UmecObservation> Observations { get; set; } = new();
 }
 

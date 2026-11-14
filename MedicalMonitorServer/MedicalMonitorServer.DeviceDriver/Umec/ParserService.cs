@@ -158,8 +158,13 @@ public class ParserService : IParserService
                 if (Setting(o) is { } s4)
                 {
                     s4.LevelCode = ParseInt(o.ValueCode);
-                    s4.Level = s4.LevelCode is int c ? ToAlarmLevel(c) : null;
+                    s4.Level = s4.LevelCode is int c ? ToSettingLevel(c) : null;
                 }
+                break;
+
+            // ---- waveform channel descriptor (ORU msg 160/161) --------------
+            case "2153" when o.ValueType == "CD":
+                if (ToWaveChannel(o) is { } wc) oru.WaveChannels.Add(wc);
                 break;
 
             // ---- monitor-wide alarm state (ORU msg 53) ----------------------
@@ -253,6 +258,38 @@ public class ParserService : IParserService
         IsAperiodic = o.AccessCheck == "APERIODIC",
         MeasuredAt = o.Timestamp,
     };
+
+    /// <summary>
+    /// <c>1101^II^0.019531&amp;mv^1.000000&amp;128^256^0&amp;255</c>:
+    /// id ^ label ^ scale&amp;unit ^ gain&amp;baseline ^ levels ^ min&amp;max.
+    /// </summary>
+    private static WaveChannel? ToWaveChannel(UmecObservation o)
+    {
+        var c = o.Value.Split('^');
+        if (c.Length < 2 || ParseInt(c[0]) is not int id) return null;
+        var scale = Amp(c, 2);
+        var gain = Amp(c, 3);
+        var range = Amp(c, 5);
+        return new WaveChannel
+        {
+            ChannelId = id,
+            Label = c[1].Trim(),
+            Scale = ParseNumber(scale.A),
+            ScaleUnit = scale.B,
+            Gain = ParseNumber(gain.A),
+            Baseline = ParseInt(gain.B),
+            Levels = c.Length > 4 ? ParseInt(c[4]) : null,
+            MinSample = ParseInt(range.A),
+            MaxSample = ParseInt(range.B),
+        };
+
+        static (string A, string B) Amp(string[] parts, int i)
+        {
+            if (i >= parts.Length) return ("", "");
+            var x = parts[i].Split('&');
+            return (x[0], x.Length > 1 ? x[1] : "");
+        }
+    }
 
     private static ActiveAlarm ToAlarm(UmecObservation o)
     {
@@ -432,8 +469,20 @@ public class ParserService : IParserService
     }
 
     /// <summary>
-    /// Alarm level as used in OBX 2009 and OBX-4 of alarm messages.
-    /// 1 = high matches the "***" prefix the monitor puts on such alarms.
+    /// Per-parameter alarm priority (OBX 2009), as seen in captures:
+    /// 0 = high, 1 = medium, 2 = low (3 = alarm off, not a level).
+    /// </summary>
+    private static AlarmLevel ToSettingLevel(int code) => code switch
+    {
+        0 => AlarmLevel.High,
+        1 => AlarmLevel.Medium,
+        2 => AlarmLevel.Low,
+        _ => AlarmLevel.Unknown,
+    };
+
+    /// <summary>
+    /// Fallback level from OBX-4 of an active alarm when the text has no
+    /// "***" prefix: 1 = high, 2 = medium, 3 = low.
     /// </summary>
     private static AlarmLevel ToAlarmLevel(int code) => code switch
     {

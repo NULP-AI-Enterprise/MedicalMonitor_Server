@@ -152,11 +152,13 @@ public class ParserServiceTests
         Assert.False(sw.Oru.AlarmSettings.Single(x => x.ParameterId == 160).Enabled);
 
         var lv = _parser.Parse(Msg(58,
-            "OBX|1|CE|2009^Alarm level|101|1^High|||||F",
-            "OBX|2|CE|2009^Alarm level|160|2^Med|||||F"))!;
+            "OBX|1|CE|2009^|101|0^|||||F",
+            "OBX|2|CE|2009^|160|1^|||||F",
+            "OBX|3|CE|2009^|170|2^|||||F"))!;
         Assert.Equal(UmecMessageKind.AlarmLevels, lv.Kind);
         Assert.Equal(AlarmLevel.High, lv.Oru!.AlarmSettings.Single(x => x.ParameterId == 101).Level);
         Assert.Equal(AlarmLevel.Medium, lv.Oru.AlarmSettings.Single(x => x.ParameterId == 160).Level);
+        Assert.Equal(AlarmLevel.Low, lv.Oru.AlarmSettings.Single(x => x.ParameterId == 170).Level);
     }
 
     [Fact]
