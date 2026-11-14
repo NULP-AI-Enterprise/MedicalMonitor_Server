@@ -1,15 +1,5 @@
 namespace MedicalMonitorServer.Contracts.Dtos;
 
-public sealed class PatientDataDto
-{
-    public string PatientId { get; init; } = string.Empty;
-
-    public string? Name { get; init; }
-
-    public IReadOnlyDictionary<string, string> Values { get; init; } =
-        new Dictionary<string, string>();
-}
-
 public sealed class PatientInfoDto
 {
     public string PatientId { get; init; } = string.Empty;

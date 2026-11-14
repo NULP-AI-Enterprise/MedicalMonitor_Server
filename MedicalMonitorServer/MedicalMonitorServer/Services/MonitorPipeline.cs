@@ -29,11 +29,23 @@ public interface IMonitorPipeline
 
     Task<bool> RemovePatientAsync(string patientId, CancellationToken ct = default);
 
+    /// <summary>
+    /// Drops a patient's vitals snapshot and active alerts (broadcasts AlertCleared). Used when
+    /// the patient changes monitors, so values from the old device do not linger.
+    /// </summary>
+    Task ResetReadingsAsync(string patientId, CancellationToken ct = default);
+
     /// <summary>Applies a telemetry frame: registers the patient if new, merges vitals, reconciles alerts, broadcasts ReceiveVitals.</summary>
     Task IngestTelemetryAsync(MonitorUpdateDto update, CancellationToken ct = default);
 
     /// <summary>Applies partial readings (only the values the device reported) for a known patient.</summary>
     Task IngestReadingsAsync(string patientId, VitalReadings readings, WaveformSampleDto[]? waveforms, DateTimeOffset timestamp, CancellationToken ct = default);
+
+    /// <summary>
+    /// Applies the full list of device alarms of one category active on the patient's monitor:
+    /// broadcasts AlertTriggered for new / re-prioritised ones and AlertCleared for those gone.
+    /// </summary>
+    Task IngestDeviceAlarmsAsync(string patientId, AlertCategory category, IReadOnlyList<AlertDto> active, CancellationToken ct = default);
 
     /// <summary>Registers a device-reported alert. Broadcasts AlertTriggered when it is new or changed severity.</summary>
     Task IngestAlertAsync(AlertDto alert, CancellationToken ct = default);
@@ -46,17 +58,23 @@ public sealed class MonitorPipeline : IMonitorPipeline
     private readonly IHubContext<VitalsHub> _hub;
     private readonly IPatientRegistry _patients;
     private readonly IAlertStateService _alerts;
+    private readonly IMonitorBindings _bindings;
+    private readonly FeedStatus _feed;
     private readonly ILogger<MonitorPipeline> _logger;
 
     public MonitorPipeline(
         IHubContext<VitalsHub> hub,
         IPatientRegistry patients,
         IAlertStateService alerts,
+        IMonitorBindings bindings,
+        FeedStatus feed,
         ILogger<MonitorPipeline> logger)
     {
         _hub = hub;
         _patients = patients;
         _alerts = alerts;
+        _bindings = bindings;
+        _feed = feed;
         _logger = logger;
     }
 
@@ -73,14 +91,28 @@ public sealed class MonitorPipeline : IMonitorPipeline
     {
         if (!_patients.Remove(patientId)) return false;
 
+        _bindings.Forget(patientId);
+
         foreach (var cleared in _alerts.ClearForPatient(patientId))
         {
+            LogAlert("cleared", cleared);
             await _hub.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
         }
 
         await _hub.Clients.All.SendAsync(HubMethods.PatientRemoved, patientId, ct);
         _logger.LogInformation("Patient {PatientId} removed.", patientId);
         return true;
+    }
+
+    public async Task ResetReadingsAsync(string patientId, CancellationToken ct = default)
+    {
+        _patients.ResetReadings(patientId);
+
+        foreach (var cleared in _alerts.ClearForPatient(patientId))
+        {
+            LogAlert("cleared", cleared);
+            await _hub.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
+        }
     }
 
     public async Task IngestTelemetryAsync(MonitorUpdateDto update, CancellationToken ct = default)
@@ -93,6 +125,11 @@ public sealed class MonitorPipeline : IMonitorPipeline
                 _patients.Get(update.PatientId)?.Diagnosis,
                 _patients.Get(update.PatientId)?.PatientType ?? "Adu"),
             ct);
+
+        if (update.WaveformChannels is { Length: > 0 } channels)
+        {
+            _patients.UpdateWaveformChannels(update.PatientId, channels);
+        }
 
         await IngestReadingsAsync(
             update.PatientId,
@@ -116,6 +153,7 @@ public sealed class MonitorPipeline : IMonitorPipeline
             return;
         }
 
+        _feed.MarkReceived();
         var merged = _patients.MergeReadings(patientId, readings);
 
         var update = new MonitorUpdateDto(
@@ -124,18 +162,40 @@ public sealed class MonitorPipeline : IMonitorPipeline
             patient.BedNumber,
             merged.ToDto(),
             waveforms ?? Array.Empty<WaveformSampleDto>(),
-            timestamp);
+            timestamp,
+            _patients.GetWaveformChannels(patientId));
 
         await _hub.Clients.All.SendAsync(HubMethods.ReceiveVitals, update, ct);
 
-        var changes = _alerts.Reconcile(patientId, merged);
+        await BroadcastAsync(_alerts.Reconcile(patientId, merged), ct);
+    }
+
+    public async Task IngestDeviceAlarmsAsync(
+        string patientId,
+        AlertCategory category,
+        IReadOnlyList<AlertDto> active,
+        CancellationToken ct = default)
+    {
+        if (_patients.Get(patientId) is null)
+        {
+            _logger.LogDebug("Device alarms for unknown patient {PatientId} ignored.", patientId);
+            return;
+        }
+
+        await BroadcastAsync(_alerts.ReconcileDevice(patientId, category, active), ct);
+    }
+
+    private async Task BroadcastAsync(AlertChangeSet changes, CancellationToken ct)
+    {
         foreach (var raised in changes.Raised)
         {
+            LogAlert("raised", raised);
             await _hub.Clients.All.SendAsync(HubMethods.AlertTriggered, raised, ct);
         }
 
         foreach (var cleared in changes.Cleared)
         {
+            LogAlert("cleared", cleared);
             await _hub.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
         }
     }
@@ -145,6 +205,7 @@ public sealed class MonitorPipeline : IMonitorPipeline
         var raised = _alerts.Raise(alert);
         if (raised is not null)
         {
+            LogAlert("raised", raised);
             await _hub.Clients.All.SendAsync(HubMethods.AlertTriggered, raised, ct);
         }
     }
@@ -154,9 +215,19 @@ public sealed class MonitorPipeline : IMonitorPipeline
         var acknowledged = _alerts.Acknowledge(alertId);
         if (acknowledged is not null)
         {
+            LogAlert("acknowledged", acknowledged);
             await _hub.Clients.All.SendAsync(HubMethods.AlertAcknowledged, acknowledged, ct);
         }
 
         return acknowledged;
     }
+
+    /// <summary>
+    /// One line per alert transition, so the log file doubles as the alarm history
+    /// (the API only exposes the currently active alerts). Grep for "Alert raised" etc.
+    /// </summary>
+    private void LogAlert(string transition, AlertDto alert) =>
+        _logger.LogInformation(
+            "Alert {Transition}: {Severity} {Source} \"{Message}\" value={Value} patient={PatientId} id={AlertId}",
+            transition, alert.Severity, alert.Source, alert.Message, alert.Value, alert.PatientId, alert.AlertId);
 }

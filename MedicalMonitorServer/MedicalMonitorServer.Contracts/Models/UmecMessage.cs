@@ -69,6 +69,13 @@ public sealed class UmecMessage
 
     public DateTime ReceivedAt { get; set; }
 
+    /// <summary>
+    /// IP address of the monitor the message was read from (the TCP peer), set by the device
+    /// provider. Empty when the transport does not know it. This identifies the data source;
+    /// which patient it belongs to is decided by the monitor bindings.
+    /// </summary>
+    public string SourceIp { get; set; } = "";
+
     /// <summary>ORU^R01 payload: vitals, alarms, settings, etc. Null for ADT messages.</summary>
     public UmecVitalsMessage? Oru { get; set; }
 
@@ -102,6 +109,9 @@ public sealed class UmecVitalsMessage
     public List<ParameterGroup> ParameterGroups { get; set; } = new();
 
     public AlarmSystemStatus? AlarmSystem { get; set; }
+
+    /// <summary>Waveform channel descriptors (OBX 2153). The HL7 stream carries no samples, only these.</summary>
+    public List<WaveChannel> WaveChannels { get; set; } = new();
 
     public List<UmecObservation> Observations { get; set; } = new();
 }

@@ -14,13 +14,6 @@ public static class ModelToDtoMappings
         State = model.State.ToDto(),
     };
 
-    public static PatientDataDto ToDto(this PatientData model) => new()
-    {
-        PatientId = model.PatientId,
-        Name = model.Name,
-        Values = model.Values.ToDictionary(entry => entry.Key, entry => entry.Value),
-    };
-
     public static PatientInfoDto ToDto(this PatientInfo model) => new()
     {
         PatientId = model.PatientId,
@@ -139,6 +132,20 @@ public static class ModelToDtoMappings
         ParameterLabels = model.ParameterLabels.Select(ToDto).ToArray(),
         ParameterGroups = model.ParameterGroups.Select(ToDto).ToArray(),
         AlarmSystem = model.AlarmSystem?.ToDto(),
+        WaveChannels = model.WaveChannels.Select(ToDto).ToArray(),
+    };
+
+    public static WaveChannelDto ToDto(this WaveChannel model) => new()
+    {
+        ChannelId = model.ChannelId,
+        Label = model.Label,
+        Scale = model.Scale,
+        ScaleUnit = model.ScaleUnit,
+        Gain = model.Gain,
+        Baseline = model.Baseline,
+        Levels = model.Levels,
+        MinSample = model.MinSample,
+        MaxSample = model.MaxSample,
     };
 
     public static DeviceAdtInfoDto ToDto(this DeviceAdtInfo model) => new()

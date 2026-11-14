@@ -1,29 +1,85 @@
 using FastEndpoints;
+using System.Globalization;
 using System.Text.Json.Serialization;
+using NReco.Logging.File;
 using FastEndpoints.Swagger;
 using MedicalMonitorServer;
 using MedicalMonitorServer.Contracts.Api;
 using MedicalMonitorServer.Core.Monitoring;
 using MedicalMonitorServer.DeviceDriver;
 using MedicalMonitorServer.Hubs;
+using MedicalMonitorServer.Security;
 using MedicalMonitorServer.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
+// Daily log file next to the console log (Logging:File in appsettings). Alert transitions are logged
+// too, so the file is also the alarm history. Relative paths are under the content root.
+var fileLog = builder.Configuration.GetSection("Logging:File");
+if (fileLog.GetValue<string>("Path") is { Length: > 0 } logPath)
+{
+    builder.Logging.AddFile(Path.Combine(builder.Environment.ContentRootPath, logPath), options =>
+    {
+        fileLog.Bind(options); // Append, MinLevel, FileSizeLimitBytes, MaxRollingFiles
+        // "{0:yyyy-MM-dd}" in Path rolls the file over at midnight.
+        options.FormatLogFileName = name => string.Format(CultureInfo.InvariantCulture, name, DateTime.Now);
+    });
+}
 
-builder.Services.AddControllers();
+// Listening address comes from "Urls" in appsettings.json (localhost only by default). To let stations
+// and gateways on the ward LAN connect, set it to the LAN address, e.g. http://192.168.1.10:5230,
+// or override with ASPNETCORE_URLS / --urls.
+
+var apiKeys = builder.Configuration.GetSection(ApiKeyOptions.Section).Get<ApiKeyOptions>() ?? new ApiKeyOptions();
+if (string.IsNullOrWhiteSpace(apiKeys.IngestionKey) || string.IsNullOrWhiteSpace(apiKeys.OperatorKey))
+{
+    // Fail closed: the server is reachable from the LAN, so it must not start with open write endpoints.
+    throw new InvalidOperationException(
+        "Security:IngestionKey and Security:OperatorKey must be set (appsettings, or env vars " +
+        "Security__IngestionKey / Security__OperatorKey).");
+}
+
+builder.Services.Configure<ApiKeyOptions>(builder.Configuration.GetSection(ApiKeyOptions.Section));
+
+var swaggerEnabled = builder.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("Swagger:Enabled");
+var extraOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
+
+builder.Services.AddSingleton(serviceProvider =>
+{
+    var options = new WatchDogOptions();
+    serviceProvider
+        .GetRequiredService<IConfiguration>()
+        .GetSection("WatchDog")
+        .Bind(options);
+    return options;
+});
 builder.Services.AddSingleton<IWatchDogService, WatchDogService>();
 builder.Services.AddSingleton<DeviceService>();
 builder.Services.AddHostedService<WatchDogHostedService>();
 builder.Services.AddFastEndpoints();
-builder.Services.SwaggerDocument();
+if (swaggerEnabled)
+{
+    builder.Services.SwaggerDocument(o =>
+    {
+        // Keys are checked by ApiKeyMiddleware, not ASP.NET auth, so declare the header
+        // document-wide; Swagger UI's Authorize button then sends it on every request.
+        o.EnableJWTBearerAuth = false;
+        o.DocumentSettings = s => s.AddSecurity(ApiKeyOptions.HeaderName, Enumerable.Empty<string>(), new NSwag.OpenApiSecurityScheme
+        {
+            Type = NSwag.OpenApiSecuritySchemeType.ApiKey,
+            Name = ApiKeyOptions.HeaderName,
+            In = NSwag.OpenApiSecurityApiKeyLocation.Header,
+            Description = "Ingestion key for /api/v1/ingestion/*, operator key for other writes. GETs need none."
+        });
+    });
+}
 
 // Monitoring API consumed by the nurse-station UI (docs/API_CONTRACT.md in MedicalMonitor_Desktop).
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowLocalhost", policy => policy
-        .SetIsOriginAllowed(IsLocalhost)
+    // Browser UIs served from this machine are always allowed; LAN UIs are listed in Cors:AllowedOrigins.
+    options.AddPolicy("AllowStations", policy => policy
+        .SetIsOriginAllowed(origin => IsLocalhost(origin) || extraOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase))
         .AllowAnyHeader()
         .AllowAnyMethod()
         .AllowCredentials());
@@ -38,7 +94,10 @@ builder.Services.AddSignalR()
 
 builder.Services.AddSingleton<IPatientRegistry, PatientRegistry>();
 builder.Services.AddSingleton<IAlertStateService, AlertStateService>();
+builder.Services.AddSingleton<IMonitorBindings, MonitorBindings>();
+builder.Services.AddSingleton<MonitorRouter>();
 builder.Services.AddSingleton<ConnectionTracker>();
+builder.Services.AddSingleton<FeedStatus>();
 builder.Services.AddSingleton<IMonitorPipeline, MonitorPipeline>();
 builder.Services.AddHostedService<UmecFeedService>();
 
@@ -49,7 +108,9 @@ var app = builder.Build();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
-app.UseCors("AllowLocalhost");
+app.UseCors("AllowStations");
+
+app.UseMiddleware<ApiKeyMiddleware>();
 
 app.UseAuthorization();
 
@@ -58,13 +119,12 @@ app.UseFastEndpoints(config =>
     config.Serializer.Options.Converters.Add(new JsonStringEnumConverter());
 });
 
-if (app.Environment.IsDevelopment())
+if (swaggerEnabled)
 {
     app.UseSwaggerGen();
 }
 
 app.MapHub<VitalsHub>(HubMethods.Route);
-app.MapControllers();
 
 app.Run();
 

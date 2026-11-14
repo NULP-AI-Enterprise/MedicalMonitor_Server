@@ -1,5 +1,6 @@
 ﻿using MedicalMonitorServer.Contracts.Models;
 using MedicalMonitorServer.DeviceDriver.Umec;
+using Microsoft.Extensions.Logging;
 
 namespace MedicalMonitorServer.DeviceDriver;
 
@@ -11,14 +12,16 @@ public class DeviceService : IDeviceService
     private readonly IWatchDogService _watchDogService;
     private readonly List<IDeviceDataProvider> _deviceDataProviders = new();
 
-    public DeviceService(IWatchDogService watchDogService)
+    public DeviceService(IWatchDogService watchDogService, ILoggerFactory? loggerFactory = null)
     {
         _watchDogService = watchDogService;
-        UmecDeviceDataProvider umecDeviceDataProvider = new();
+        UmecDeviceDataProvider umecDeviceDataProvider =
+            new(loggerFactory?.CreateLogger<UmecDeviceDataProvider>());
         _watchDogService.OnDeviceStateChanged += OnDeviceStateChanged;
         _deviceDataProviders.Add(umecDeviceDataProvider);
         foreach (var provider in _deviceDataProviders){
             provider.OnDeviceConnected += OnDeviceConnected;
+            provider.OnDeviceDisconnected += OnDeviceDisconnected;
             provider.OnMessageReceived += OnProviderMessageReceived;
         }
     }
@@ -67,7 +70,18 @@ public class DeviceService : IDeviceService
             _deviceStates[sender] = states;
         }
 
-        states.Add(deviceState);
+        if (states.All(state => state.IpAddress != deviceState.IpAddress))
+        {
+            states.Add(deviceState);
+        }
+    }
+
+    private void OnDeviceDisconnected(IDeviceDataProvider sender, DeviceState deviceState)
+    {
+        if (_deviceStates.TryGetValue(sender, out var states))
+        {
+            states.RemoveAll(state => state.IpAddress == deviceState.IpAddress);
+        }
     }
     public List<DeviceState> GetAllDevice(){
         List<DeviceState> devices = new();

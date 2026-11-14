@@ -151,15 +151,20 @@ public class ParserService : IParserService
                 break;
 
             // ---- alarm setup per parameter, OBX-4 = parameter id (ORU msg 51/58/60)
-            case "2002": if (Setting(o) is { } s1) s1.HighLimit = ParseNumber(o.Value); break;
-            case "2003": if (Setting(o) is { } s2) s2.LowLimit = ParseNumber(o.Value); break;
+            case "2002": if (Setting(o) is { } s1) s1.HighLimit = ParseValidNumber(o.Value); break;
+            case "2003": if (Setting(o) is { } s2) s2.LowLimit = ParseValidNumber(o.Value); break;
             case "2004": if (Setting(o) is { } s3) s3.Enabled = ParseFlag(o.ValueCode); break;
             case "2009":
                 if (Setting(o) is { } s4)
                 {
                     s4.LevelCode = ParseInt(o.ValueCode);
-                    s4.Level = s4.LevelCode is int c ? ToAlarmLevel(c) : null;
+                    s4.Level = s4.LevelCode is int c ? ToSettingLevel(c) : null;
                 }
+                break;
+
+            // ---- waveform channel descriptor (ORU msg 160/161) --------------
+            case "2153" when o.ValueType == "CD":
+                if (ToWaveChannel(o) is { } wc) oru.WaveChannels.Add(wc);
                 break;
 
             // ---- monitor-wide alarm state (ORU msg 53) ----------------------
@@ -247,12 +252,44 @@ public class ParserService : IParserService
         Label = o.Label,
         Unit = o.Units.Length > 0 ? o.Units
              : Parameters.TryGetValue(pid, out var d) ? d.Unit : "",
-        Value = IsValidValue(o.Value) ? ParseNumber(o.Value) : null,
+        Value = ParseValidNumber(o.Value),
         RawValue = o.Value,
         ModuleId = ParseInt(o.SubId),
         IsAperiodic = o.AccessCheck == "APERIODIC",
         MeasuredAt = o.Timestamp,
     };
+
+    /// <summary>
+    /// <c>1101^II^0.019531&amp;mv^1.000000&amp;128^256^0&amp;255</c>:
+    /// id ^ label ^ scale&amp;unit ^ gain&amp;baseline ^ levels ^ min&amp;max.
+    /// </summary>
+    private static WaveChannel? ToWaveChannel(UmecObservation o)
+    {
+        var c = o.Value.Split('^');
+        if (c.Length < 2 || ParseInt(c[0]) is not int id) return null;
+        var scale = Amp(c, 2);
+        var gain = Amp(c, 3);
+        var range = Amp(c, 5);
+        return new WaveChannel
+        {
+            ChannelId = id,
+            Label = c[1].Trim(),
+            Scale = ParseNumber(scale.A),
+            ScaleUnit = scale.B,
+            Gain = ParseNumber(gain.A),
+            Baseline = ParseInt(gain.B),
+            Levels = c.Length > 4 ? ParseInt(c[4]) : null,
+            MinSample = ParseInt(range.A),
+            MaxSample = ParseInt(range.B),
+        };
+
+        static (string A, string B) Amp(string[] parts, int i)
+        {
+            if (i >= parts.Length) return ("", "");
+            var x = parts[i].Split('&');
+            return (x[0], x.Length > 1 ? x[1] : "");
+        }
+    }
 
     private static ActiveAlarm ToAlarm(UmecObservation o)
     {
@@ -288,6 +325,7 @@ public class ParserService : IParserService
         var p = new PatientInfo();
         if (pid != null)
         {
+            p.PidPresent = true;
             p.PatientId = pid[3];
             string name = pid[5];
             p.LastName = DecodeText(Component(name, 0)).Trim();
@@ -412,9 +450,18 @@ public class ParserService : IParserService
     };
 
     // Mindray "no valid measurement" sentinels.
-    private static readonly HashSet<string> Invalid = new() { "-100", "-1000", "-10000" };
+    private static readonly double[] InvalidValues = { -100, -1000, -10000 };
 
-    private static bool IsValidValue(string v) => !Invalid.Contains(v);
+    /// <summary>
+    /// Compared as numbers, not text, so "-100.0", "-100.00" and "-1e2" are caught too.
+    /// A value that is not a number at all is not valid either.
+    /// </summary>
+    private static bool IsValidValue(string v) =>
+        ParseNumber(v) is double d && !InvalidValues.Contains(d);
+
+    /// <summary>Number, or null when empty, not numeric or a "no value" sentinel.</summary>
+    private static double? ParseValidNumber(string v) =>
+        IsValidValue(v) ? ParseNumber(v) : null;
 
     private static string NameOf(int pid, string label)
     {
@@ -423,8 +470,20 @@ public class ParserService : IParserService
     }
 
     /// <summary>
-    /// Alarm level as used in OBX 2009 and OBX-4 of alarm messages.
-    /// 1 = high matches the "***" prefix the monitor puts on such alarms.
+    /// Per-parameter alarm priority (OBX 2009), as seen in captures:
+    /// 0 = high, 1 = medium, 2 = low (3 = alarm off, not a level).
+    /// </summary>
+    private static AlarmLevel ToSettingLevel(int code) => code switch
+    {
+        0 => AlarmLevel.High,
+        1 => AlarmLevel.Medium,
+        2 => AlarmLevel.Low,
+        _ => AlarmLevel.Unknown,
+    };
+
+    /// <summary>
+    /// Fallback level from OBX-4 of an active alarm when the text has no
+    /// "***" prefix: 1 = high, 2 = medium, 3 = low.
     /// </summary>
     private static AlarmLevel ToAlarmLevel(int code) => code switch
     {
