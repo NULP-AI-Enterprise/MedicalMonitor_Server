@@ -21,6 +21,7 @@ public class DeviceService : IDeviceService
         _deviceDataProviders.Add(umecDeviceDataProvider);
         foreach (var provider in _deviceDataProviders){
             provider.OnDeviceConnected += OnDeviceConnected;
+            provider.OnDeviceDisconnected += OnDeviceDisconnected;
             provider.OnMessageReceived += OnProviderMessageReceived;
         }
     }
@@ -69,7 +70,18 @@ public class DeviceService : IDeviceService
             _deviceStates[sender] = states;
         }
 
-        states.Add(deviceState);
+        if (states.All(state => state.IpAddress != deviceState.IpAddress))
+        {
+            states.Add(deviceState);
+        }
+    }
+
+    private void OnDeviceDisconnected(IDeviceDataProvider sender, DeviceState deviceState)
+    {
+        if (_deviceStates.TryGetValue(sender, out var states))
+        {
+            states.RemoveAll(state => state.IpAddress == deviceState.IpAddress);
+        }
     }
     public List<DeviceState> GetAllDevice(){
         List<DeviceState> devices = new();

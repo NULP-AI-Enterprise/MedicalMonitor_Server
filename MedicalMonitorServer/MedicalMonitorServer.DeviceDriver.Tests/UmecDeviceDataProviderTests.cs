@@ -45,17 +45,33 @@ public class UmecDeviceDataProviderTests
     }
 
     [Fact]
-    public void Connecting_raises_OnDeviceConnected()
+    public async Task An_open_stream_raises_OnDeviceConnected()
     {
         var reader = new FakeReader(FakeReader.StaysOpen);
         using var provider = Provider(reader);
         var seen = new List<DeviceState>();
-        provider.OnDeviceConnected += (_, state) => seen.Add(state);
+        provider.OnDeviceConnected += (_, state) => { lock (seen) { seen.Add(state); } };
 
         var monitor = Monitor();
         provider.Connect(monitor);
 
-        Assert.Equal(new[] { monitor }, seen);
+        await Wait.UntilAsync(() => { lock (seen) { return seen.Count == 1; } }, "the device is reported connected");
+        lock (seen) { Assert.Equal(new[] { monitor }, seen); }
+    }
+
+    [Fact]
+    public async Task A_dropped_stream_raises_OnDeviceDisconnected_and_the_reconnect_reports_it_up_again()
+    {
+        var reader = new FakeReader(FakeReader.DeliversThenEnds(Vitals), FakeReader.StaysOpen);
+        using var provider = Provider(reader);
+        var events = new List<string>();
+        provider.OnDeviceConnected += (_, _) => { lock (events) { events.Add("up"); } };
+        provider.OnDeviceDisconnected += (_, _) => { lock (events) { events.Add("down"); } };
+
+        provider.Connect(Monitor());
+
+        await Wait.UntilAsync(() => { lock (events) { return events.Count == 3; } }, "the link drops and comes back");
+        lock (events) { Assert.Equal(new[] { "up", "down", "up" }, events); }
     }
 
     [Fact]

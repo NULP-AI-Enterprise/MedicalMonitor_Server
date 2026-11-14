@@ -6,6 +6,8 @@ public interface IDeviceDataProvider : IDisposable
 {
     event Action<IDeviceDataProvider, DeviceState>? OnDeviceConnected;
 
+    event Action<IDeviceDataProvider, DeviceState>? OnDeviceDisconnected;
+
     event Action<UmecMessage>? OnMessageReceived;
 
     IReadOnlyCollection<DeviceState> ConnectedDevices { get; }

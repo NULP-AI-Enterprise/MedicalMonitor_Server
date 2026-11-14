@@ -35,7 +35,11 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
         _parserService = parserService ?? new ParserService();
     }
 
+    /// <summary>Raised when a monitor's TCP stream is actually open (again after every reconnect).</summary>
     public event Action<IDeviceDataProvider, DeviceState>? OnDeviceConnected;
+
+    /// <summary>Raised when an open stream to a monitor ends, whoever ended it.</summary>
+    public event Action<IDeviceDataProvider, DeviceState>? OnDeviceDisconnected;
 
     public event Action<UmecMessage>? OnMessageReceived;
 
@@ -67,12 +71,13 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
             _readerFactory(_logger),
             _parserService,
             _options,
-            _logger);
+            _logger,
+            state => OnDeviceConnected?.Invoke(this, state),
+            state => OnDeviceDisconnected?.Invoke(this, state));
 
         if (_connections.TryAdd(deviceState.IpAddress, connection))
         {
             _logger.LogInformation("Opening the HL7 link to monitor {Ip}:{Port}.", deviceState.IpAddress, port);
-            OnDeviceConnected?.Invoke(this, deviceState);
             connection.Start();
         }
         else

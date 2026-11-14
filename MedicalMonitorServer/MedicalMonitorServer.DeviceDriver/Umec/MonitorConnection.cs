@@ -21,10 +21,13 @@ internal sealed class MonitorConnection : IDisposable
     private readonly IParserService _parserService;
     private readonly Action<UmecMessage> _messageReceived;
     private readonly Action<MonitorConnection, bool> _closed;
+    private readonly Action<DeviceState>? _linkUp;
+    private readonly Action<DeviceState>? _linkDown;
     private readonly UmecLinkOptions _options;
     private readonly ILogger _logger;
     private readonly int _port;
     private int _messagesThisSession;
+    private int _sessionUp;
     private int _disposed;
 
     public MonitorConnection(
@@ -35,7 +38,9 @@ internal sealed class MonitorConnection : IDisposable
         IComunicationService communicationService,
         IParserService parserService,
         UmecLinkOptions options,
-        ILogger logger)
+        ILogger logger,
+        Action<DeviceState>? linkUp = null,
+        Action<DeviceState>? linkDown = null)
     {
         State = state;
         _port = port;
@@ -45,6 +50,8 @@ internal sealed class MonitorConnection : IDisposable
         _parserService = parserService;
         _options = options;
         _logger = logger;
+        _linkUp = linkUp;
+        _linkDown = linkDown;
     }
 
     public DeviceState State { get; }
@@ -97,6 +104,14 @@ internal sealed class MonitorConnection : IDisposable
                     _logger.LogError(ex, "HL7 link to monitor {Ip}:{Port} failed after {Count} message(s).",
                         State.IpAddress, _port, Volatile.Read(ref _messagesThisSession));
                 }
+                finally
+                {
+                    // Only a session that actually got a TCP stream was ever reported as up.
+                    if (Interlocked.Exchange(ref _sessionUp, 0) == 1)
+                    {
+                        _linkDown?.Invoke(State);
+                    }
+                }
 
                 // A session that carried data proves the monitor is there,
                 // so only fruitless attempts count towards giving up.
@@ -132,6 +147,11 @@ internal sealed class MonitorConnection : IDisposable
     /// </summary>
     private async Task RunSessionAsync(IMonitorLink link, CancellationToken cancellationToken)
     {
+        // The reader calls this only once the TCP stream is open, so the device is
+        // reported as connected when it really is, not when the dial was started.
+        Interlocked.Exchange(ref _sessionUp, 1);
+        _linkUp?.Invoke(State);
+
         // Without this query the monitor only emits its own echo.
         await link.SendAsync(UmecRequests.StartDataQuery, cancellationToken);
         _logger.LogInformation("Asked monitor {Ip}:{Port} to start sending (QRY^R02, id 1203).",

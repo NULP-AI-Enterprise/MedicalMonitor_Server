@@ -29,6 +29,15 @@ builder.Services.Configure<ApiKeyOptions>(builder.Configuration.GetSection(ApiKe
 var swaggerEnabled = builder.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("Swagger:Enabled");
 var extraOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
 
+builder.Services.AddSingleton(serviceProvider =>
+{
+    var options = new WatchDogOptions();
+    serviceProvider
+        .GetRequiredService<IConfiguration>()
+        .GetSection("WatchDog")
+        .Bind(options);
+    return options;
+});
 builder.Services.AddSingleton<IWatchDogService, WatchDogService>();
 builder.Services.AddSingleton<DeviceService>();
 builder.Services.AddHostedService<WatchDogHostedService>();
