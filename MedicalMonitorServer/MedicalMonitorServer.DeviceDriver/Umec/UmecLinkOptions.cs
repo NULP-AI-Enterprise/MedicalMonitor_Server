@@ -15,6 +15,15 @@ public sealed record UmecLinkOptions
     /// </summary>
     public TimeSpan EchoInterval { get; init; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// How often to repeat the start query on a live session. A uMec10 (SW 01.10.00)
+    /// ignores the query it gets right after connecting, while it is still sending
+    /// its settings, so periodic parameters (HR, SpO2, RR) only start with a later
+    /// one. Repeating it also re-subscribes after the monitor reloads its modules
+    /// (e.g. leaving demo mode). A repeated query does not trigger another settings dump.
+    /// </summary>
+    public TimeSpan QueryRefreshInterval { get; init; } = TimeSpan.FromSeconds(10);
+
     /// <summary>Consecutive sessions without a single message after which a connection gives up.</summary>
     public int MaxFailedSessions { get; init; } = 5;
 }

@@ -86,6 +86,26 @@ public class MonitorConnectionTests
     }
 
     [Fact]
+    public async Task The_start_query_is_repeated_while_the_session_is_up()
+    {
+        // A uMec10 ignores the query sent while it is still dumping its settings.
+        var reader = new FakeReader(FakeReader.StaysOpen);
+        var options = FastOptions with { QueryRefreshInterval = TimeSpan.FromMilliseconds(60) };
+        using var connection = Build(reader, out _, out _, options);
+
+        connection.Start();
+        await Wait.UntilAsync(
+            () => reader.Sessions.Count == 1 &&
+                  reader.Sessions[0].Link.SentText.Count(t => t == UmecRequests.StartDataQueryText) >= 3,
+            "the query has been repeated twice");
+
+        var sent = reader.Sessions[0].Link.SentText;
+        Assert.Equal(UmecRequests.StartDataQueryText, sent[0]);
+        Assert.Contains(UmecRequests.EchoText, sent);       // the echo keeps going alongside
+        Assert.Equal(1, reader.Attempts);                   // on the same session, no reconnect
+    }
+
+    [Fact]
     public async Task The_start_query_is_sent_again_on_every_reconnect()
     {
         var reader = new FakeReader(FakeReader.EndsImmediately);

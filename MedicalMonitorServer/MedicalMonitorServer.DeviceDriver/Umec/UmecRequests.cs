@@ -19,8 +19,9 @@ public static class UmecRequests
     /// Mindray Realtime Results Interface (PDS Protocol Programmer's Guide, 6.9):
     /// QRD is required, and periodic parameters (ORU^R01 id 204: HR, SpO2, RR, Temp...)
     /// are only sent for a QRF filter that asks for them. A bare MSH still gets
-    /// settings, alarms and aperiodic NIBP. Not yet confirmed on the live uMec10
-    /// (SW 01.10.00): in demo mode no 204 arrived with either query.
+    /// settings, alarms and aperiodic NIBP. Verified on a live uMec10 (SW 01.10.00):
+    /// it sends 204 only once this query is repeated after the initial settings dump
+    /// (see <see cref="UmecLinkOptions.QueryRefreshInterval"/>), and never in demo mode.
     /// QRF filter = &lt;IP&gt;&amp;&lt;IPSeq&gt;^&lt;SendType&gt;^&lt;SendFreq s&gt;^&lt;SendAll&gt;^&lt;List&gt;;
     /// IP/IPSeq are 0 for a direct monitor link. SendType 1 = parameters,
     /// 3 = physiological alarms, 4 = technical alarms.
@@ -28,7 +29,7 @@ public static class UmecRequests
     /// </para>
     /// </summary>
     public const string StartDataQueryText =
-        "MSH|^~\\&|||||||QRY^R02|1203|P|2.3.1|\r" +
+        "MSH|^~\\&|||||||QRY^R02|1203|P|2.3.1\r" +
         "QRD|20060731145557|R|I|MMSQRY|||||RES\r" +
         "QRF|MON||||0&0^1^1^1^\r" +
         "QRF|MON||||0&0^3^1^1^\r" +

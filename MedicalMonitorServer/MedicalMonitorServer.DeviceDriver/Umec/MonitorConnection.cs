@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using MedicalMonitorServer.Contracts.Models;
 using Microsoft.Extensions.Logging;
 
@@ -157,10 +158,20 @@ internal sealed class MonitorConnection : IDisposable
         _logger.LogInformation("Asked monitor {Ip}:{Port} to start sending (QRY^R02, id 1203).",
             State.IpAddress, _port);
 
+        // The first query is ignored by a monitor still busy with its settings dump,
+        // so it is repeated on the echo tick; see UmecLinkOptions.QueryRefreshInterval.
+        var sinceQuery = Stopwatch.StartNew();
         using var echoTimer = new PeriodicTimer(_options.EchoInterval);
         while (await echoTimer.WaitForNextTickAsync(cancellationToken))
         {
             await link.SendAsync(UmecRequests.Echo, cancellationToken);
+
+            if (sinceQuery.Elapsed >= _options.QueryRefreshInterval)
+            {
+                await link.SendAsync(UmecRequests.StartDataQuery, cancellationToken);
+                sinceQuery.Restart();
+                _logger.LogDebug("Repeated the start query to monitor {Ip}:{Port}.", State.IpAddress, _port);
+            }
         }
     }
 
