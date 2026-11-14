@@ -1,5 +1,6 @@
 ﻿using MedicalMonitorServer.Contracts.Models;
 using MedicalMonitorServer.DeviceDriver.Umec;
+using Microsoft.Extensions.Logging;
 
 namespace MedicalMonitorServer.DeviceDriver;
 
@@ -11,10 +12,11 @@ public class DeviceService : IDeviceService
     private readonly IWatchDogService _watchDogService;
     private readonly List<IDeviceDataProvider> _deviceDataProviders = new();
 
-    public DeviceService(IWatchDogService watchDogService)
+    public DeviceService(IWatchDogService watchDogService, ILoggerFactory? loggerFactory = null)
     {
         _watchDogService = watchDogService;
-        UmecDeviceDataProvider umecDeviceDataProvider = new();
+        UmecDeviceDataProvider umecDeviceDataProvider =
+            new(loggerFactory?.CreateLogger<UmecDeviceDataProvider>());
         _watchDogService.OnDeviceStateChanged += OnDeviceStateChanged;
         _deviceDataProviders.Add(umecDeviceDataProvider);
         foreach (var provider in _deviceDataProviders){
