@@ -18,13 +18,29 @@ Content-Type: application/json
   "vitals": {
     "heartRate": 72,
     "spO2": 98,
-    "nibp": { "systolic": 120, "diastolic": 80, "meanArterialPressure": 0 },
-    "respiratoryRate": 0,
-    "temperature": 0,
+    "nibp": { "systolic": 120, "diastolic": 80, "meanArterialPressure": null },
+    "respiratoryRate": null,
+    "temperature": null,
     "pulseRate": 72
   },
   "waveforms": [],
   "timestamp": "2026-11-14T10:00:00Z"
+}
+
+###
+
+# Device alarm: keyed by code ("P-001:device:458"); severity follows level (High = Critical).
+POST {{host}}/api/v1/ingestion/alerts
+X-Api-Key: {{ingestionKey}}
+Content-Type: application/json
+
+{
+  "patientId": "P-001",
+  "severity": "Warning",
+  "message": "ECG lead off",
+  "code": 458,
+  "level": "Low",
+  "category": "Technical"
 }
 
 ###

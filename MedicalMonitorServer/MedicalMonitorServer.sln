@@ -17,6 +17,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MedicalMonitorServer.Consol
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MedicalMonitorServer.DeviceDriver.Tests", "MedicalMonitorServer.DeviceDriver.Tests\MedicalMonitorServer.DeviceDriver.Tests.csproj", "{B9F1B013-5CF3-4CE3-BBD5-CBC591A7259E}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MedicalMonitorServer.Core.Tests", "MedicalMonitorServer.Core.Tests\MedicalMonitorServer.Core.Tests.csproj", "{19B00F94-855B-4E39-8597-1B487F0DA7D1}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -51,6 +53,10 @@ Global
 		{B9F1B013-5CF3-4CE3-BBD5-CBC591A7259E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B9F1B013-5CF3-4CE3-BBD5-CBC591A7259E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B9F1B013-5CF3-4CE3-BBD5-CBC591A7259E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{19B00F94-855B-4E39-8597-1B487F0DA7D1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{19B00F94-855B-4E39-8597-1B487F0DA7D1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{19B00F94-855B-4E39-8597-1B487F0DA7D1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{19B00F94-855B-4E39-8597-1B487F0DA7D1}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
