@@ -29,6 +29,12 @@ public interface IMonitorPipeline
 
     Task<bool> RemovePatientAsync(string patientId, CancellationToken ct = default);
 
+    /// <summary>
+    /// Drops a patient's vitals snapshot and active alerts (broadcasts AlertCleared). Used when
+    /// the patient changes monitors, so values from the old device do not linger.
+    /// </summary>
+    Task ResetReadingsAsync(string patientId, CancellationToken ct = default);
+
     /// <summary>Applies a telemetry frame: registers the patient if new, merges vitals, reconciles alerts, broadcasts ReceiveVitals.</summary>
     Task IngestTelemetryAsync(MonitorUpdateDto update, CancellationToken ct = default);
 
@@ -46,17 +52,23 @@ public sealed class MonitorPipeline : IMonitorPipeline
     private readonly IHubContext<VitalsHub> _hub;
     private readonly IPatientRegistry _patients;
     private readonly IAlertStateService _alerts;
+    private readonly IMonitorBindings _bindings;
+    private readonly FeedStatus _feed;
     private readonly ILogger<MonitorPipeline> _logger;
 
     public MonitorPipeline(
         IHubContext<VitalsHub> hub,
         IPatientRegistry patients,
         IAlertStateService alerts,
+        IMonitorBindings bindings,
+        FeedStatus feed,
         ILogger<MonitorPipeline> logger)
     {
         _hub = hub;
         _patients = patients;
         _alerts = alerts;
+        _bindings = bindings;
+        _feed = feed;
         _logger = logger;
     }
 
@@ -73,6 +85,8 @@ public sealed class MonitorPipeline : IMonitorPipeline
     {
         if (!_patients.Remove(patientId)) return false;
 
+        _bindings.Forget(patientId);
+
         foreach (var cleared in _alerts.ClearForPatient(patientId))
         {
             await _hub.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
@@ -81,6 +95,16 @@ public sealed class MonitorPipeline : IMonitorPipeline
         await _hub.Clients.All.SendAsync(HubMethods.PatientRemoved, patientId, ct);
         _logger.LogInformation("Patient {PatientId} removed.", patientId);
         return true;
+    }
+
+    public async Task ResetReadingsAsync(string patientId, CancellationToken ct = default)
+    {
+        _patients.ResetReadings(patientId);
+
+        foreach (var cleared in _alerts.ClearForPatient(patientId))
+        {
+            await _hub.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
+        }
     }
 
     public async Task IngestTelemetryAsync(MonitorUpdateDto update, CancellationToken ct = default)
@@ -116,6 +140,7 @@ public sealed class MonitorPipeline : IMonitorPipeline
             return;
         }
 
+        _feed.MarkReceived();
         var merged = _patients.MergeReadings(patientId, readings);
 
         var update = new MonitorUpdateDto(

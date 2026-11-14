@@ -1,6 +1,33 @@
-@MedicalMonitorServer_HostAddress = http://localhost:5230
+@host = http://localhost:5230
+# Keys from appsettings.Development.json
+@ingestionKey = dev-ingestion-key
+@operatorKey = dev-operator-key
 
-GET {{MedicalMonitorServer_HostAddress}}/weatherforecast/
-Accept: application/json
+GET {{host}}/api/v1/health
 
 ###
+
+POST {{host}}/api/v1/ingestion/telemetry
+X-Api-Key: {{ingestionKey}}
+Content-Type: application/json
+
+{
+  "patientId": "P-001",
+  "patientName": "Test Patient",
+  "bedNumber": 1,
+  "vitals": {
+    "heartRate": 72,
+    "spO2": 98,
+    "nibp": { "systolic": 120, "diastolic": 80, "meanArterialPressure": 0 },
+    "respiratoryRate": 0,
+    "temperature": 0,
+    "pulseRate": 72
+  },
+  "waveforms": [],
+  "timestamp": "2026-11-14T10:00:00Z"
+}
+
+###
+
+POST {{host}}/api/v1/alerts/P-001:HeartRate/acknowledge
+X-Api-Key: {{operatorKey}}

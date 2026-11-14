@@ -21,6 +21,9 @@ public interface IPatientRegistry
 
     /// <summary>Merges new readings into the patient's snapshot and returns the merged result.</summary>
     VitalReadings MergeReadings(string patientId, VitalReadings update);
+
+    /// <summary>Forgets the patient's snapshot, e.g. when they move to another monitor.</summary>
+    void ResetReadings(string patientId);
 }
 
 public sealed class PatientRegistry : IPatientRegistry
@@ -58,6 +61,8 @@ public sealed class PatientRegistry : IPatientRegistry
 
     public VitalReadings? GetReadings(string patientId) =>
         _readings.TryGetValue(patientId, out var readings) ? readings : null;
+
+    public void ResetReadings(string patientId) => _readings.TryRemove(patientId, out _);
 
     public VitalReadings MergeReadings(string patientId, VitalReadings update) =>
         _readings.AddOrUpdate(patientId, _ => update, (_, existing) => existing.Merge(update));

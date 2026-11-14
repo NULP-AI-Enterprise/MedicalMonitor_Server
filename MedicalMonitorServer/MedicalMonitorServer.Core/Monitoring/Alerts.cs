@@ -49,15 +49,21 @@ public sealed record VitalReadings(
     double? Temperature = null,
     int? PulseRate = null)
 {
+    /// <summary>
+    /// Builds readings from a wire DTO, where 0 means "not measured" (the same convention
+    /// <see cref="ToDto"/> uses). Zeros become null so an absent sensor never raises a critical alert.
+    /// </summary>
     public static VitalReadings From(VitalsDto vitals) => new(
-        vitals.HeartRate,
-        vitals.SpO2,
-        vitals.Nibp?.Systolic,
-        vitals.Nibp?.Diastolic,
-        vitals.Nibp?.MeanArterialPressure,
-        vitals.RespiratoryRate,
-        vitals.Temperature,
-        vitals.PulseRate);
+        Measured(vitals.HeartRate),
+        Measured(vitals.SpO2),
+        Measured(vitals.Nibp?.Systolic ?? 0),
+        Measured(vitals.Nibp?.Diastolic ?? 0),
+        Measured(vitals.Nibp?.MeanArterialPressure ?? 0),
+        Measured(vitals.RespiratoryRate),
+        vitals.Temperature > 0 ? vitals.Temperature : null,
+        Measured(vitals.PulseRate));
+
+    private static int? Measured(int value) => value > 0 ? value : null;
 
     /// <summary>Overlays the values present in <paramref name="update"/> on top of this snapshot.</summary>
     public VitalReadings Merge(VitalReadings update) => new(

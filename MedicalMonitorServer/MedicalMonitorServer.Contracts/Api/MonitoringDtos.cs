@@ -35,6 +35,27 @@ public record PatientInfoDto(
     string? Diagnosis,
     string PatientType = "Adu");
 
+/// <summary>A bedside monitor and the patient it is currently feeding.</summary>
+/// <param name="MonitorIp">IP address of the monitor; identifies it in the transfer endpoint.</param>
+/// <param name="BedNumber">Bed the monitor reports; 0 when it has not reported one.</param>
+/// <param name="PatientId">Patient whose data this monitor provides; null when nobody is bound.</param>
+/// <param name="ReportedPatientId">Patient id the monitor itself sends; empty when it has none, null when not yet known.</param>
+public record MonitorBindingDto(
+    string MonitorIp,
+    int BedNumber,
+    string? PatientId,
+    string? ReportedPatientId,
+    DateTimeOffset LastSeen);
+
+/// <param name="Patient">The patient after the move (bed follows the monitor).</param>
+/// <param name="PreviousMonitorIp">Monitor the patient was on before; null if none.</param>
+/// <param name="DisplacedPatientId">Identified patient that was bound to the target monitor and is now without one; null if none.</param>
+public record TransferResultDto(
+    PatientInfoDto Patient,
+    string MonitorIp,
+    string? PreviousMonitorIp,
+    string? DisplacedPatientId);
+
 public record BloodPressureDto(int Systolic, int Diastolic, int MeanArterialPressure);
 
 public record VitalsDto(
@@ -69,7 +90,18 @@ public record AlertDto(
     public static string BuildId(string patientId, VitalSignType vitalSign) => $"{patientId}:{vitalSign}";
 }
 
-public record HealthDto(string Status, DateTimeOffset Timestamp, int ActivePatients, int ConnectedStations);
+/// <param name="Status">"Healthy" (fresh data), "Degraded" (data stale or none yet) or "Unhealthy" (patients on the roster but no data and no monitor connected).</param>
+/// <param name="ConnectedMonitors">Bedside monitors (uMec devices) currently connected.</param>
+/// <param name="LastDataAt">When the last vitals reading arrived; null if none since startup.</param>
+/// <param name="DataAgeSeconds">Seconds since <paramref name="LastDataAt"/>; null if none since startup.</param>
+public record HealthDto(
+    string Status,
+    DateTimeOffset Timestamp,
+    int ActivePatients,
+    int ConnectedStations,
+    int ConnectedMonitors = 0,
+    DateTimeOffset? LastDataAt = null,
+    double? DataAgeSeconds = null);
 
 public static class VitalSignLabels
 {

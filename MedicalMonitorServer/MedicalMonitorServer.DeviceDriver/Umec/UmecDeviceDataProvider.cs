@@ -128,6 +128,7 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
             var message = _parserService.Parse(data);
             if (message is not null)
             {
+                message.SourceIp = State.IpAddress;
                 _messageReceived(message);
             }
 
