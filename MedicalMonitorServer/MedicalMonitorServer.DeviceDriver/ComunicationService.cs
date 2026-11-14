@@ -103,6 +103,12 @@ public class ComunicationService : IComunicationService
         int remaining = buf.Length - consumed;
         if (remaining > MaxFrameSize)
         {
+            // A start byte with no terminator in sight: the buffer can only
+            // grow from here, so say so and resync on the next frame.
+            _logger.LogWarning(
+                "MLLP buffer overflow: dropped {Dropped} buffered bytes with no frame terminator "
+                + "(limit {Limit} bytes); resyncing on the next start byte.",
+                remaining, MaxFrameSize);
             remaining = 0;                      // never-ending frame: start over
         }
         if (consumed > 0 || remaining == 0)
