@@ -437,3 +437,7 @@ Parser/read
 
 # Captured HL7 test fixtures
 !**/Fixtures/*.log
+
+# Live server logs stay local; snapshots worth keeping are copied to captures/
+MedicalMonitorServer/MedicalMonitorServer/logs/
+!MedicalMonitorServer/captures/*.log
