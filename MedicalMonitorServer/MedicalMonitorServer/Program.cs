@@ -11,8 +11,9 @@ using MedicalMonitorServer.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Listening address comes from "Urls" in appsettings.json (http://0.0.0.0:5230 = every interface,
-// so nurse stations and gateways on the ward LAN can reach it). Override with ASPNETCORE_URLS or --urls.
+// Listening address comes from "Urls" in appsettings.json (localhost only by default). To let stations
+// and gateways on the ward LAN connect, set it to the LAN address, e.g. http://192.168.1.10:5230,
+// or override with ASPNETCORE_URLS / --urls.
 
 var apiKeys = builder.Configuration.GetSection(ApiKeyOptions.Section).Get<ApiKeyOptions>() ?? new ApiKeyOptions();
 if (string.IsNullOrWhiteSpace(apiKeys.IngestionKey) || string.IsNullOrWhiteSpace(apiKeys.OperatorKey))
