@@ -162,9 +162,16 @@ public class ComunicationService : IComunicationService
         using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
         var reader = ReadFramesAsync(stream, ip, port, onMessageReceived, sessionCts.Token);
-        var writer = onConnected is null
-            ? Task.CompletedTask
-            : onConnected(new MonitorLink(stream), sessionCts.Token);
+        var writer = onConnected?.Invoke(new MonitorLink(stream), sessionCts.Token);
+
+        if (writer is null)
+        {
+            // Nothing runs alongside the reader, so there is nothing to race
+            // it against: racing it with an already-completed task would end
+            // the session before a single byte had been read.
+            await reader;
+            return;
+        }
 
         await Task.WhenAny(reader, writer);
         sessionCts.Cancel();                    // whichever side is still running is done too
