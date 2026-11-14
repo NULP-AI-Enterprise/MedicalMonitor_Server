@@ -49,15 +49,21 @@ public sealed record VitalReadings(
     double? Temperature = null,
     int? PulseRate = null)
 {
+    /// <summary>
+    /// Builds readings from a wire DTO. Both null and 0 mean "not measured" (0 is kept for
+    /// older gateways) and become null, so an absent sensor never raises a critical alert.
+    /// </summary>
     public static VitalReadings From(VitalsDto vitals) => new(
-        vitals.HeartRate,
-        vitals.SpO2,
-        vitals.Nibp?.Systolic,
-        vitals.Nibp?.Diastolic,
-        vitals.Nibp?.MeanArterialPressure,
-        vitals.RespiratoryRate,
-        vitals.Temperature,
-        vitals.PulseRate);
+        Measured(vitals.HeartRate),
+        Measured(vitals.SpO2),
+        Measured(vitals.Nibp?.Systolic),
+        Measured(vitals.Nibp?.Diastolic),
+        Measured(vitals.Nibp?.MeanArterialPressure),
+        Measured(vitals.RespiratoryRate),
+        vitals.Temperature > 0 ? vitals.Temperature : null,
+        Measured(vitals.PulseRate));
+
+    private static int? Measured(int? value) => value > 0 ? value : null;
 
     /// <summary>Overlays the values present in <paramref name="update"/> on top of this snapshot.</summary>
     public VitalReadings Merge(VitalReadings update) => new(
@@ -70,18 +76,19 @@ public sealed record VitalReadings(
         update.Temperature ?? Temperature,
         update.PulseRate ?? PulseRate);
 
+    /// <summary>Wire form: missing values stay null. Nibp is always an object, its fields may be null.</summary>
     public VitalsDto ToDto()
     {
         var map = MeanArterialPressure
-            ?? (Systolic is int s && Diastolic is int d ? (int)Math.Round((s + 2.0 * d) / 3.0) : 0);
+            ?? (Systolic is int s && Diastolic is int d ? (int)Math.Round((s + 2.0 * d) / 3.0) : null);
 
         return new VitalsDto(
-            HeartRate ?? 0,
-            SpO2 ?? 0,
-            new BloodPressureDto(Systolic ?? 0, Diastolic ?? 0, map),
-            RespiratoryRate ?? 0,
-            Temperature ?? 0,
-            PulseRate ?? 0);
+            HeartRate,
+            SpO2,
+            new BloodPressureDto(Systolic, Diastolic, map),
+            RespiratoryRate,
+            Temperature,
+            PulseRate);
     }
 }
 
@@ -159,7 +166,17 @@ public readonly record struct AlertChangeSet(IReadOnlyList<AlertDto> Raised, IRe
 /// <summary>Tracks active alerts so only transitions (raise / escalate / clear) are broadcast.</summary>
 public interface IAlertStateService
 {
+    /// <summary>
+    /// Re-evaluates the server thresholds. Only alerts keyed by vital sign (no device code)
+    /// can be cleared here; device alarms are managed by <see cref="ReconcileDevice"/>.
+    /// </summary>
     AlertChangeSet Reconcile(string patientId, VitalReadings readings);
+
+    /// <summary>
+    /// Applies the complete list of device alarms of one category that are active on the
+    /// patient's monitor right now: new ones are raised, missing ones cleared.
+    /// </summary>
+    AlertChangeSet ReconcileDevice(string patientId, AlertCategory category, IReadOnlyList<AlertDto> active);
 
     /// <summary>Registers an alert reported directly by a device gateway. Returns it when it is new or changed severity.</summary>
     AlertDto? Raise(AlertDto alert);
@@ -176,10 +193,21 @@ public sealed class AlertStateService : IAlertStateService
     private readonly ConcurrentDictionary<string, AlertDto> _active = new();
     private readonly object _lock = new();
 
-    public AlertChangeSet Reconcile(string patientId, VitalReadings readings)
-    {
-        var candidates = AlertEvaluator.Evaluate(patientId, readings);
+    public AlertChangeSet Reconcile(string patientId, VitalReadings readings) =>
+        Apply(patientId, AlertEvaluator.Evaluate(patientId, readings), a => a.Code is null);
 
+    public AlertChangeSet ReconcileDevice(string patientId, AlertCategory category, IReadOnlyList<AlertDto> active) =>
+        Apply(
+            patientId,
+            active.Where(a => a.PatientId == patientId).ToList(),
+            a => a.Source == AlertSource.Device && a.Code is not null && a.Category == category);
+
+    /// <summary>
+    /// Makes <paramref name="candidates"/> the active set among the patient's alerts selected by
+    /// <paramref name="owned"/>: raises new or re-prioritised ones, clears owned ones no longer present.
+    /// </summary>
+    private AlertChangeSet Apply(string patientId, IReadOnlyList<AlertDto> candidates, Func<AlertDto, bool> owned)
+    {
         lock (_lock)
         {
             List<AlertDto>? raised = null;
@@ -192,7 +220,12 @@ public sealed class AlertStateService : IAlertStateService
                     if (existing.Severity == candidate.Severity)
                     {
                         // Same breach: refresh the value silently, keep raise time and acknowledgement.
-                        _active[candidate.AlertId] = existing with { Value = candidate.Value, Message = candidate.Message };
+                        _active[candidate.AlertId] = existing with
+                        {
+                            Value = candidate.Value,
+                            Message = candidate.Message,
+                            Level = candidate.Level,
+                        };
                         continue;
                     }
 
@@ -209,7 +242,7 @@ public sealed class AlertStateService : IAlertStateService
 
             var candidateIds = candidates.Select(a => a.AlertId).ToHashSet();
             foreach (var stale in _active.Values
-                         .Where(a => a.PatientId == patientId && !candidateIds.Contains(a.AlertId))
+                         .Where(a => a.PatientId == patientId && owned(a) && !candidateIds.Contains(a.AlertId))
                          .ToList())
             {
                 if (_active.TryRemove(stale.AlertId, out var removed)) (cleared ??= new()).Add(removed);
@@ -229,7 +262,7 @@ public sealed class AlertStateService : IAlertStateService
         {
             if (_active.TryGetValue(alert.AlertId, out var existing) && existing.Severity == alert.Severity)
             {
-                _active[alert.AlertId] = existing with { Value = alert.Value, Message = alert.Message };
+                _active[alert.AlertId] = existing with { Value = alert.Value, Message = alert.Message, Level = alert.Level };
                 return null;
             }
 

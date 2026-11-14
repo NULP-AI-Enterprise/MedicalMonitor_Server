@@ -8,7 +8,8 @@ namespace MedicalMonitorServer.Services;
 
 /// <summary>
 /// Bridges decoded uMec HL7 messages from <see cref="DeviceService"/> into the monitoring
-/// pipeline: admitted patients become roster entries, measured values become vitals frames.
+/// pipeline: measured values, device alarms and waveform channels go to the patient bound to
+/// the sending monitor (see <see cref="MonitorRouter"/>).
 /// Messages are queued so the device read loops are never blocked by SignalR broadcasting.
 /// </summary>
 public sealed class UmecFeedService : BackgroundService
@@ -16,6 +17,7 @@ public sealed class UmecFeedService : BackgroundService
     private readonly DeviceService _deviceService;
     private readonly IMonitorPipeline _pipeline;
     private readonly IPatientRegistry _patients;
+    private readonly MonitorRouter _router;
     private readonly ILogger<UmecFeedService> _logger;
 
     private readonly Channel<UmecMessage> _queue = Channel.CreateBounded<UmecMessage>(
@@ -29,11 +31,13 @@ public sealed class UmecFeedService : BackgroundService
         DeviceService deviceService,
         IMonitorPipeline pipeline,
         IPatientRegistry patients,
+        MonitorRouter router,
         ILogger<UmecFeedService> logger)
     {
         _deviceService = deviceService;
         _pipeline = pipeline;
         _patients = patients;
+        _router = router;
         _logger = logger;
     }
 
@@ -68,56 +72,91 @@ public sealed class UmecFeedService : BackgroundService
     private async Task HandleAsync(UmecMessage message, CancellationToken ct)
     {
         var info = message.Oru?.Patient ?? message.Adt?.Patient;
-        string? patientId = null;
+        var oru = message.Oru;
 
-        if (info is not null && !string.IsNullOrWhiteSpace(info.PatientId))
+        var readings = oru is { Vitals.Count: > 0 } ? ToReadings(oru.Vitals) : new VitalReadings();
+        var hasReadings = readings != new VitalReadings();
+
+        // Most messages carry no PID at all (the monitor sends it only in its patient-info
+        // message), so the owner comes from the monitor the message was read from.
+        var monitorIp = !string.IsNullOrWhiteSpace(message.SourceIp)
+            ? message.SourceIp
+            : info?.MonitorIp ?? string.Empty;
+
+        var patientId = await _router.ResolveAsync(monitorIp, info, hasReadings, ct);
+        if (oru is null || patientId is null) return;
+
+        if (oru.WaveChannels.Count > 0)
         {
-            patientId = info.PatientId;
-            await _pipeline.UpsertPatientAsync(ToPatientDto(info), ct);
+            _patients.UpdateWaveformChannels(patientId, oru.WaveChannels.Select(ToChannelDto));
         }
 
-        var vitals = message.Oru?.Vitals;
-        if (vitals is null || vitals.Count == 0) return;
-
-        var readings = ToReadings(vitals);
-        if (readings == new VitalReadings()) return;
-
-        // Vitals messages normally repeat the PID segment. If this one did not, fall back to
-        // the only patient on the roster; with several patients the owner is ambiguous.
-        patientId ??= SingleKnownPatientId();
-        if (patientId is null)
+        // Msg 54 / 56 list every alarm of that category active right now; an empty list means none.
+        var category = message.Kind switch
         {
-            _logger.LogDebug("Vitals message {MessageId} dropped: patient unknown.", message.MessageId);
-            return;
+            UmecMessageKind.PhysiologicalAlarms => AlertCategory.Physiological,
+            UmecMessageKind.TechnicalAlarms => AlertCategory.Technical,
+            _ => (AlertCategory?)null,
+        };
+        if (category is { } c)
+        {
+            var active = oru.Alarms
+                .Where(a => a.AlarmId != 0)
+                .Select(a => ToAlertDto(patientId, a, c))
+                .ToList();
+            await _pipeline.IngestDeviceAlarmsAsync(patientId, c, active, ct);
         }
+
+        if (!hasReadings) return;
 
         await _pipeline.IngestReadingsAsync(patientId, readings, null, DateTimeOffset.UtcNow, ct);
     }
 
-    private string? SingleKnownPatientId()
+    private static AlertDto ToAlertDto(string patientId, ActiveAlarm alarm, AlertCategory category)
     {
-        var all = _patients.GetAll();
-        return all.Count == 1 ? all[0].PatientId : null;
+        DeviceAlarmLevel? level = alarm.Level switch
+        {
+            AlarmLevel.High => DeviceAlarmLevel.High,
+            AlarmLevel.Medium => DeviceAlarmLevel.Medium,
+            AlarmLevel.Low => DeviceAlarmLevel.Low,
+            _ => null,
+        };
+
+        return new AlertDto(
+            AlertDto.BuildDeviceId(patientId, alarm.AlarmId),
+            patientId,
+            VitalSign: null,
+            AlertDto.SeverityOf(level),
+            string.IsNullOrWhiteSpace(alarm.Text) ? $"Device alarm {alarm.AlarmId}" : alarm.Text,
+            Value: null,
+            DateTimeOffset.UtcNow,
+            Source: AlertSource.Device,
+            Code: alarm.AlarmId,
+            Level: level,
+            Category: category);
     }
 
-    private static PatientInfoDto ToPatientDto(PatientInfo info)
-    {
-        var name = !string.IsNullOrWhiteSpace(info.FullName)
-            ? info.FullName
-            : $"{info.LastName} {info.FirstName}".Trim();
-
-        return new PatientInfoDto(
-            info.PatientId,
-            string.IsNullOrWhiteSpace(name) ? info.PatientId : name,
-            int.TryParse(info.BedNumber, out var bed) ? bed : 0,
-            null,
-            info.PatientType switch
+    private static WaveformChannelDto ToChannelDto(WaveChannel c) => new(
+        c.ChannelId,
+        c.ChannelId switch
+        {
+            1151 => WaveformType.Respiration,
+            1152 => WaveformType.Pleth,
+            >= 1100 and < 1150 => c.Label switch
             {
-                Contracts.Models.PatientType.Pediatric => "Ped",
-                Contracts.Models.PatientType.Neonate => "Neo",
-                _ => "Adu",
-            });
-    }
+                "II" => WaveformType.ECG_II,
+                "I" => WaveformType.ECG_I,
+                _ => null,
+            },
+            _ => null,
+        },
+        c.Label,
+        c.Scale,
+        c.ScaleUnit,
+        c.Baseline,
+        c.Levels,
+        c.MinSample,
+        c.MaxSample);
 
     /// <summary>Maps Mindray parameter ids to the vitals the UI shows.</summary>
     private static VitalReadings ToReadings(IEnumerable<VitalSign> vitals)
