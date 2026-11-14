@@ -1,13 +1,39 @@
 using System.Collections.Concurrent;
 using MedicalMonitorServer.Contracts.Models;
 using MedicalMonitorServer.DeviceDriver;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace MedicalMonitorServer.DeviceDriver.Umec;
 
 public sealed class UmecDeviceDataProvider : IDeviceDataProvider
 {
     private readonly ConcurrentDictionary<string, MonitorConnection> _connections = new();
-    private readonly ConcurrentDictionary<string, PatientData> _patients = new();
+    private readonly ConcurrentDictionary<string, PatientInfo> _patients = new();
+    private readonly Func<ILogger, IComunicationService> _readerFactory;
+    private readonly IParserService _parserService;
+    private readonly UmecLinkOptions _options;
+    private readonly ILogger _logger;
+
+    /// <param name="logger">Logger for the provider and every link it opens.</param>
+    /// <param name="options">Link timings; the defaults match a real uMec10.</param>
+    /// <param name="readerFactory">
+    /// Makes the reader for one link. One instance per connection, because a
+    /// reader holds that connection's half-received frame. Tests substitute
+    /// this to drive a link without a monitor on the network.
+    /// </param>
+    /// <param name="parserService">Decoder for received messages; stateless, so one is shared.</param>
+    public UmecDeviceDataProvider(
+        ILogger<UmecDeviceDataProvider>? logger = null,
+        UmecLinkOptions? options = null,
+        Func<ILogger, IComunicationService>? readerFactory = null,
+        IParserService? parserService = null)
+    {
+        _logger = logger ?? NullLogger<UmecDeviceDataProvider>.Instance;
+        _options = options ?? new UmecLinkOptions();
+        _readerFactory = readerFactory ?? (log => new ComunicationService(log));
+        _parserService = parserService ?? new ParserService();
+    }
 
     public event Action<IDeviceDataProvider, DeviceState>? OnDeviceConnected;
 
@@ -16,7 +42,7 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
     public IReadOnlyCollection<DeviceState> ConnectedDevices =>
         _connections.Values.Select(connection => connection.State).ToArray();
 
-    public IReadOnlyCollection<PatientData> Patients => _patients.Values.ToArray();
+    public IReadOnlyCollection<PatientInfo> Patients => _patients.Values.ToArray();
 
     public void Connect(DeviceState deviceState)
     {
@@ -33,9 +59,19 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
             return;
         }
 
-        var connection = new MonitorConnection(deviceState, port, OnMessage);
+        var connection = new MonitorConnection(
+            deviceState,
+            port,
+            OnMessage,
+            OnConnectionClosed,
+            _readerFactory(_logger),
+            _parserService,
+            _options,
+            _logger);
+
         if (_connections.TryAdd(deviceState.IpAddress, connection))
         {
+            _logger.LogInformation("Opening the HL7 link to monitor {Ip}:{Port}.", deviceState.IpAddress, port);
             OnDeviceConnected?.Invoke(this, deviceState);
             connection.Start();
         }
@@ -51,8 +87,34 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
 
         if (_connections.TryRemove(deviceState.IpAddress, out var connection))
         {
+            _logger.LogInformation("Closing the HL7 link to monitor {Ip}.", deviceState.IpAddress);
             connection.Dispose();
         }
+    }
+
+    /// <summary>
+    /// A connection reports itself here once its run loop is over. Leaving it
+    /// in <see cref="_connections"/> would keep the monitor offline for good,
+    /// because <see cref="Connect"/> skips an address that is already there.
+    /// </summary>
+    /// <param name="cancelled">True when we closed the link ourselves.</param>
+    private void OnConnectionClosed(MonitorConnection connection, bool cancelled)
+    {
+        var state = connection.State;
+        _connections.TryRemove(new KeyValuePair<string, MonitorConnection>(state.IpAddress, connection));
+
+        if (cancelled)
+        {
+            return;
+        }
+
+        // The watchdog only reports state *changes*, so a monitor it still
+        // considers connected would never be handed to us again. Marking it
+        // disconnected makes its next successful probe do exactly that.
+        state.State = DeviceStateEnum.Disconnected;
+
+        _logger.LogWarning("Dropped the HL7 link to monitor {Ip}:{Port}; waiting for the watchdog to see it again.",
+            state.IpAddress, state.Port);
     }
 
     private void OnMessage(UmecMessage message)
@@ -60,16 +122,7 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
         var patient = message.Oru?.Patient ?? message.Adt?.Patient;
         if (patient is not null && !string.IsNullOrWhiteSpace(patient.PatientId))
         {
-            _patients[patient.PatientId] = new PatientData
-            {
-                PatientId = patient.PatientId,
-                Name = patient.FullName,
-                Values = new Dictionary<string, string>
-                {
-                    ["bedNumber"] = patient.BedNumber,
-                    ["department"] = patient.Department,
-                },
-            };
+            _patients[patient.PatientId] = patient;
         }
 
         OnMessageReceived?.Invoke(message);
@@ -83,61 +136,5 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
         }
 
         _connections.Clear();
-    }
-
-    private sealed class MonitorConnection : IDisposable
-    {
-        private readonly CancellationTokenSource _cancellationTokenSource = new();
-        private readonly ComunicationService _communicationService = new();
-        private readonly ParserService _parserService;
-        private readonly Action<UmecMessage> _messageReceived;
-        private readonly int _port;
-
-        public MonitorConnection(DeviceState state, int port, Action<UmecMessage> messageReceived)
-        {
-            State = state;
-            _port = port;
-            _parserService = new ParserService();
-            _messageReceived = messageReceived;
-        }
-
-        public DeviceState State { get; }
-
-        public void Start()
-        {
-            _ = RunAsync();
-        }
-
-        private async Task RunAsync()
-        {
-            try
-            {
-                await _communicationService.ReadTcpStreamAsync(
-                    State.IpAddress,
-                    _port,
-                    Parse,
-                    _cancellationTokenSource.Token);
-            }
-            catch (OperationCanceledException) when (_cancellationTokenSource.IsCancellationRequested)
-            {
-            }
-        }
-
-        private Task Parse(byte[] data, CancellationToken cancellationToken)
-        {
-            var message = _parserService.Parse(data);
-            if (message is not null)
-            {
-                _messageReceived(message);
-            }
-
-            return Task.CompletedTask;
-        }
-
-        public void Dispose()
-        {
-            _cancellationTokenSource.Cancel();
-            _cancellationTokenSource.Dispose();
-        }
     }
 }
