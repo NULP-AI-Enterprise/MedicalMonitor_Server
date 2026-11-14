@@ -14,6 +14,12 @@ public sealed class PatientInfo
     /// <summary>PID-3, the monitor's GUID for the patient.</summary>
     public string PatientId { get; set; } = "";
 
+    /// <summary>
+    /// True when the message carried a PID segment, so an empty <see cref="PatientId"/> means
+    /// "the monitor has no patient id" rather than "this message does not say".
+    /// </summary>
+    public bool PidPresent { get; set; }
+
     /// <summary>PID-5 first component.</summary>
     public string LastName { get; set; } = "";
 

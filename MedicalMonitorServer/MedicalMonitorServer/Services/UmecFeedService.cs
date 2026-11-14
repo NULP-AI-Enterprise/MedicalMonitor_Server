@@ -8,14 +8,15 @@ namespace MedicalMonitorServer.Services;
 
 /// <summary>
 /// Bridges decoded uMec HL7 messages from <see cref="DeviceService"/> into the monitoring
-/// pipeline: admitted patients become roster entries, measured values become vitals frames.
+/// pipeline: measured values become vitals frames of the patient bound to the sending monitor
+/// (see <see cref="MonitorRouter"/>).
 /// Messages are queued so the device read loops are never blocked by SignalR broadcasting.
 /// </summary>
 public sealed class UmecFeedService : BackgroundService
 {
     private readonly DeviceService _deviceService;
     private readonly IMonitorPipeline _pipeline;
-    private readonly IPatientRegistry _patients;
+    private readonly MonitorRouter _router;
     private readonly ILogger<UmecFeedService> _logger;
 
     private readonly Channel<UmecMessage> _queue = Channel.CreateBounded<UmecMessage>(
@@ -28,12 +29,12 @@ public sealed class UmecFeedService : BackgroundService
     public UmecFeedService(
         DeviceService deviceService,
         IMonitorPipeline pipeline,
-        IPatientRegistry patients,
+        MonitorRouter router,
         ILogger<UmecFeedService> logger)
     {
         _deviceService = deviceService;
         _pipeline = pipeline;
-        _patients = patients;
+        _router = router;
         _logger = logger;
     }
 
@@ -68,55 +69,21 @@ public sealed class UmecFeedService : BackgroundService
     private async Task HandleAsync(UmecMessage message, CancellationToken ct)
     {
         var info = message.Oru?.Patient ?? message.Adt?.Patient;
-        string? patientId = null;
-
-        if (info is not null && !string.IsNullOrWhiteSpace(info.PatientId))
-        {
-            patientId = info.PatientId;
-            await _pipeline.UpsertPatientAsync(ToPatientDto(info), ct);
-        }
 
         var vitals = message.Oru?.Vitals;
-        if (vitals is null || vitals.Count == 0) return;
+        var readings = vitals is { Count: > 0 } ? ToReadings(vitals) : new VitalReadings();
+        var hasReadings = readings != new VitalReadings();
 
-        var readings = ToReadings(vitals);
-        if (readings == new VitalReadings()) return;
+        // Most messages carry no PID at all (the monitor sends it only in its patient-info
+        // message), so the owner comes from the monitor the message was read from.
+        var monitorIp = !string.IsNullOrWhiteSpace(message.SourceIp)
+            ? message.SourceIp
+            : info?.MonitorIp ?? string.Empty;
 
-        // Vitals messages normally repeat the PID segment. If this one did not, fall back to
-        // the only patient on the roster; with several patients the owner is ambiguous.
-        patientId ??= SingleKnownPatientId();
-        if (patientId is null)
-        {
-            _logger.LogDebug("Vitals message {MessageId} dropped: patient unknown.", message.MessageId);
-            return;
-        }
+        var patientId = await _router.ResolveAsync(monitorIp, info, hasReadings, ct);
+        if (patientId is null || !hasReadings) return;
 
         await _pipeline.IngestReadingsAsync(patientId, readings, null, DateTimeOffset.UtcNow, ct);
-    }
-
-    private string? SingleKnownPatientId()
-    {
-        var all = _patients.GetAll();
-        return all.Count == 1 ? all[0].PatientId : null;
-    }
-
-    private static PatientInfoDto ToPatientDto(PatientInfo info)
-    {
-        var name = !string.IsNullOrWhiteSpace(info.FullName)
-            ? info.FullName
-            : $"{info.LastName} {info.FirstName}".Trim();
-
-        return new PatientInfoDto(
-            info.PatientId,
-            string.IsNullOrWhiteSpace(name) ? info.PatientId : name,
-            int.TryParse(info.BedNumber, out var bed) ? bed : 0,
-            null,
-            info.PatientType switch
-            {
-                Contracts.Models.PatientType.Pediatric => "Ped",
-                Contracts.Models.PatientType.Neonate => "Neo",
-                _ => "Adu",
-            });
     }
 
     /// <summary>Maps Mindray parameter ids to the vitals the UI shows.</summary>

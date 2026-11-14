@@ -58,6 +58,8 @@ builder.Services.AddSignalR()
 
 builder.Services.AddSingleton<IPatientRegistry, PatientRegistry>();
 builder.Services.AddSingleton<IAlertStateService, AlertStateService>();
+builder.Services.AddSingleton<IMonitorBindings, MonitorBindings>();
+builder.Services.AddSingleton<MonitorRouter>();
 builder.Services.AddSingleton<ConnectionTracker>();
 builder.Services.AddSingleton<FeedStatus>();
 builder.Services.AddSingleton<IMonitorPipeline, MonitorPipeline>();

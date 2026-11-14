@@ -325,6 +325,7 @@ public class ParserService : IParserService
         var p = new PatientInfo();
         if (pid != null)
         {
+            p.PidPresent = true;
             p.PatientId = pid[3];
             string name = pid[5];
             p.LastName = DecodeText(Component(name, 0)).Trim();
