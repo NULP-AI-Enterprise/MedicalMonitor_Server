@@ -13,6 +13,15 @@ var builder = WebApplication.CreateBuilder(args);
 // Add services to the container.
 
 builder.Services.AddControllers();
+builder.Services.AddSingleton(serviceProvider =>
+{
+    var options = new WatchDogOptions();
+    serviceProvider
+        .GetRequiredService<IConfiguration>()
+        .GetSection("WatchDog")
+        .Bind(options);
+    return options;
+});
 builder.Services.AddSingleton<IWatchDogService, WatchDogService>();
 builder.Services.AddSingleton<DeviceService>();
 builder.Services.AddHostedService<WatchDogHostedService>();
