@@ -37,6 +37,29 @@ public sealed class UmecVitalsSnapshotDto
     public IReadOnlyList<ParameterGroupDto> ParameterGroups { get; init; } = Array.Empty<ParameterGroupDto>();
 
     public AlarmSystemStatusDto? AlarmSystem { get; init; }
+
+    public IReadOnlyList<WaveChannelDto> WaveChannels { get; init; } = Array.Empty<WaveChannelDto>();
+}
+
+public sealed class WaveChannelDto
+{
+    public int ChannelId { get; init; }
+
+    public string Label { get; init; } = string.Empty;
+
+    public double? Scale { get; init; }
+
+    public string ScaleUnit { get; init; } = string.Empty;
+
+    public double? Gain { get; init; }
+
+    public int? Baseline { get; init; }
+
+    public int? Levels { get; init; }
+
+    public int? MinSample { get; init; }
+
+    public int? MaxSample { get; init; }
 }
 
 /// <summary>
