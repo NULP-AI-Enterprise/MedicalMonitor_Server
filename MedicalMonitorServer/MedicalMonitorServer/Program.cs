@@ -44,7 +44,19 @@ builder.Services.AddHostedService<WatchDogHostedService>();
 builder.Services.AddFastEndpoints();
 if (swaggerEnabled)
 {
-    builder.Services.SwaggerDocument();
+    builder.Services.SwaggerDocument(o =>
+    {
+        // Keys are checked by ApiKeyMiddleware, not ASP.NET auth, so declare the header
+        // document-wide; Swagger UI's Authorize button then sends it on every request.
+        o.EnableJWTBearerAuth = false;
+        o.DocumentSettings = s => s.AddSecurity(ApiKeyOptions.HeaderName, Enumerable.Empty<string>(), new NSwag.OpenApiSecurityScheme
+        {
+            Type = NSwag.OpenApiSecuritySchemeType.ApiKey,
+            Name = ApiKeyOptions.HeaderName,
+            In = NSwag.OpenApiSecurityApiKeyLocation.Header,
+            Description = "Ingestion key for /api/v1/ingestion/*, operator key for other writes. GETs need none."
+        });
+    });
 }
 
 // Monitoring API consumed by the nurse-station UI (docs/API_CONTRACT.md in MedicalMonitor_Desktop).
