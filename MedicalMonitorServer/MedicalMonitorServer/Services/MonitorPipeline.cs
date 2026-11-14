@@ -95,6 +95,7 @@ public sealed class MonitorPipeline : IMonitorPipeline
 
         foreach (var cleared in _alerts.ClearForPatient(patientId))
         {
+            LogAlert("cleared", cleared);
             await _hub.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
         }
 
@@ -109,6 +110,7 @@ public sealed class MonitorPipeline : IMonitorPipeline
 
         foreach (var cleared in _alerts.ClearForPatient(patientId))
         {
+            LogAlert("cleared", cleared);
             await _hub.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
         }
     }
@@ -187,11 +189,13 @@ public sealed class MonitorPipeline : IMonitorPipeline
     {
         foreach (var raised in changes.Raised)
         {
+            LogAlert("raised", raised);
             await _hub.Clients.All.SendAsync(HubMethods.AlertTriggered, raised, ct);
         }
 
         foreach (var cleared in changes.Cleared)
         {
+            LogAlert("cleared", cleared);
             await _hub.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
         }
     }
@@ -201,6 +205,7 @@ public sealed class MonitorPipeline : IMonitorPipeline
         var raised = _alerts.Raise(alert);
         if (raised is not null)
         {
+            LogAlert("raised", raised);
             await _hub.Clients.All.SendAsync(HubMethods.AlertTriggered, raised, ct);
         }
     }
@@ -210,9 +215,19 @@ public sealed class MonitorPipeline : IMonitorPipeline
         var acknowledged = _alerts.Acknowledge(alertId);
         if (acknowledged is not null)
         {
+            LogAlert("acknowledged", acknowledged);
             await _hub.Clients.All.SendAsync(HubMethods.AlertAcknowledged, acknowledged, ct);
         }
 
         return acknowledged;
     }
+
+    /// <summary>
+    /// One line per alert transition, so the log file doubles as the alarm history
+    /// (the API only exposes the currently active alerts). Grep for "Alert raised" etc.
+    /// </summary>
+    private void LogAlert(string transition, AlertDto alert) =>
+        _logger.LogInformation(
+            "Alert {Transition}: {Severity} {Source} \"{Message}\" value={Value} patient={PatientId} id={AlertId}",
+            transition, alert.Severity, alert.Source, alert.Message, alert.Value, alert.PatientId, alert.AlertId);
 }

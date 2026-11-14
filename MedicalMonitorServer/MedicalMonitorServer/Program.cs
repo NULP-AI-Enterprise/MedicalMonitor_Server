@@ -1,5 +1,7 @@
 using FastEndpoints;
+using System.Globalization;
 using System.Text.Json.Serialization;
+using NReco.Logging.File;
 using FastEndpoints.Swagger;
 using MedicalMonitorServer;
 using MedicalMonitorServer.Contracts.Api;
@@ -10,6 +12,19 @@ using MedicalMonitorServer.Security;
 using MedicalMonitorServer.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Daily log file next to the console log (Logging:File in appsettings). Alert transitions are logged
+// too, so the file is also the alarm history. Relative paths are under the content root.
+var fileLog = builder.Configuration.GetSection("Logging:File");
+if (fileLog.GetValue<string>("Path") is { Length: > 0 } logPath)
+{
+    builder.Logging.AddFile(Path.Combine(builder.Environment.ContentRootPath, logPath), options =>
+    {
+        fileLog.Bind(options); // Append, MinLevel, FileSizeLimitBytes, MaxRollingFiles
+        // "{0:yyyy-MM-dd}" in Path rolls the file over at midnight.
+        options.FormatLogFileName = name => string.Format(CultureInfo.InvariantCulture, name, DateTime.Now);
+    });
+}
 
 // Listening address comes from "Urls" in appsettings.json (localhost only by default). To let stations
 // and gateways on the ward LAN connect, set it to the LAN address, e.g. http://192.168.1.10:5230,

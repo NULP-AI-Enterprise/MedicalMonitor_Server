@@ -9,6 +9,7 @@
   <ItemGroup>
     <PackageReference Include="FastEndpoints" Version="8.3.0" />
     <PackageReference Include="FastEndpoints.Swagger" Version="8.3.0" />
+    <PackageReference Include="NReco.Logging.File" Version="1.2.1" />
   </ItemGroup>
 
   <ItemGroup>
