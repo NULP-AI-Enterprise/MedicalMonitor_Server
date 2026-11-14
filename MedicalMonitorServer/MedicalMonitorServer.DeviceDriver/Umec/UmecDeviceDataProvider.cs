@@ -10,11 +10,29 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
 {
     private readonly ConcurrentDictionary<string, MonitorConnection> _connections = new();
     private readonly ConcurrentDictionary<string, PatientInfo> _patients = new();
+    private readonly Func<ILogger, IComunicationService> _readerFactory;
+    private readonly IParserService _parserService;
+    private readonly UmecLinkOptions _options;
     private readonly ILogger _logger;
 
-    public UmecDeviceDataProvider(ILogger<UmecDeviceDataProvider>? logger = null)
+    /// <param name="logger">Logger for the provider and every link it opens.</param>
+    /// <param name="options">Link timings; the defaults match a real uMec10.</param>
+    /// <param name="readerFactory">
+    /// Makes the reader for one link. One instance per connection, because a
+    /// reader holds that connection's half-received frame. Tests substitute
+    /// this to drive a link without a monitor on the network.
+    /// </param>
+    /// <param name="parserService">Decoder for received messages; stateless, so one is shared.</param>
+    public UmecDeviceDataProvider(
+        ILogger<UmecDeviceDataProvider>? logger = null,
+        UmecLinkOptions? options = null,
+        Func<ILogger, IComunicationService>? readerFactory = null,
+        IParserService? parserService = null)
     {
         _logger = logger ?? NullLogger<UmecDeviceDataProvider>.Instance;
+        _options = options ?? new UmecLinkOptions();
+        _readerFactory = readerFactory ?? (log => new ComunicationService(log));
+        _parserService = parserService ?? new ParserService();
     }
 
     public event Action<IDeviceDataProvider, DeviceState>? OnDeviceConnected;
@@ -41,7 +59,16 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
             return;
         }
 
-        var connection = new MonitorConnection(deviceState, port, OnMessage, OnConnectionClosed, _logger);
+        var connection = new MonitorConnection(
+            deviceState,
+            port,
+            OnMessage,
+            OnConnectionClosed,
+            _readerFactory(_logger),
+            _parserService,
+            _options,
+            _logger);
+
         if (_connections.TryAdd(deviceState.IpAddress, connection))
         {
             _logger.LogInformation("Opening the HL7 link to monitor {Ip}:{Port}.", deviceState.IpAddress, port);
@@ -109,187 +136,5 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
         }
 
         _connections.Clear();
-    }
-
-    private sealed class MonitorConnection : IDisposable
-    {
-        /// <summary>Pause before dialling the monitor again after a failed session.</summary>
-        private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
-
-        /// <summary>
-        /// The monitor wants to hear from us at least every 10 seconds; half
-        /// that leaves room for one lost echo.
-        /// </summary>
-        private static readonly TimeSpan EchoInterval = TimeSpan.FromSeconds(5);
-
-        /// <summary>Consecutive sessions without a single message after which this connection gives up.</summary>
-        private const int MaxFailedSessions = 5;
-
-        private readonly CancellationTokenSource _cancellationTokenSource = new();
-        private readonly ComunicationService _communicationService;
-        private readonly ParserService _parserService;
-        private readonly Action<UmecMessage> _messageReceived;
-        private readonly Action<MonitorConnection, bool> _closed;
-        private readonly ILogger _logger;
-        private readonly int _port;
-        private int _messagesThisSession;
-        private int _disposed;
-
-        public MonitorConnection(
-            DeviceState state,
-            int port,
-            Action<UmecMessage> messageReceived,
-            Action<MonitorConnection, bool> closed,
-            ILogger logger)
-        {
-            State = state;
-            _port = port;
-            _parserService = new ParserService();
-            _communicationService = new ComunicationService(logger);
-            _messageReceived = messageReceived;
-            _closed = closed;
-            _logger = logger;
-        }
-
-        public DeviceState State { get; }
-
-        public void Start()
-        {
-            _ = RunAsync();
-        }
-
-        /// <summary>
-        /// Keeps the HL7 link up: every broken or failed session is logged and
-        /// retried after <see cref="ReconnectDelay"/>. After
-        /// <see cref="MaxFailedSessions"/> attempts that carried no data the
-        /// connection gives up and reports itself closed.
-        /// </summary>
-        private async Task RunAsync()
-        {
-            var cancellationToken = _cancellationTokenSource.Token;
-            int failedSessions = 0;
-
-            try
-            {
-                while (!cancellationToken.IsCancellationRequested && failedSessions < MaxFailedSessions)
-                {
-                    Interlocked.Exchange(ref _messagesThisSession, 0);
-
-                    try
-                    {
-                        await _communicationService.ReadTcpStreamAsync(
-                            State.IpAddress,
-                            _port,
-                            Parse,
-                            RunSessionAsync,
-                            cancellationToken);
-
-                        if (cancellationToken.IsCancellationRequested)
-                        {
-                            break;
-                        }
-
-                        _logger.LogWarning("Monitor {Ip}:{Port} ended the HL7 stream after {Count} message(s).",
-                            State.IpAddress, _port, Volatile.Read(ref _messagesThisSession));
-                    }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                    {
-                        break;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "HL7 link to monitor {Ip}:{Port} failed after {Count} message(s).",
-                            State.IpAddress, _port, Volatile.Read(ref _messagesThisSession));
-                    }
-
-                    // A session that carried data proves the monitor is there,
-                    // so only fruitless attempts count towards giving up.
-                    failedSessions = Volatile.Read(ref _messagesThisSession) > 0 ? 0 : failedSessions + 1;
-
-                    try
-                    {
-                        await Task.Delay(ReconnectDelay, cancellationToken);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                }
-
-                if (failedSessions >= MaxFailedSessions)
-                {
-                    _logger.LogError("Monitor {Ip}:{Port} delivered nothing in {Attempts} attempts; giving up.",
-                        State.IpAddress, _port, failedSessions);
-                }
-            }
-            finally
-            {
-                _closed(this, cancellationToken.IsCancellationRequested);
-                _cancellationTokenSource.Dispose();
-            }
-        }
-
-        /// <summary>
-        /// Runs for as long as the stream is up: asks the monitor to start
-        /// sending vitals and alarms, then keeps the link alive with the echo
-        /// it expects. Cancelled by the reader as soon as the stream ends.
-        /// </summary>
-        private async Task RunSessionAsync(IMonitorLink link, CancellationToken cancellationToken)
-        {
-            // Without this query the monitor only emits its own echo.
-            await link.SendAsync(UmecRequests.StartDataQuery, cancellationToken);
-            _logger.LogInformation("Asked monitor {Ip}:{Port} to start sending (QRY^R02, id 1203).",
-                State.IpAddress, _port);
-
-            using var echoTimer = new PeriodicTimer(EchoInterval);
-            while (await echoTimer.WaitForNextTickAsync(cancellationToken))
-            {
-                await link.SendAsync(UmecRequests.Echo, cancellationToken);
-            }
-        }
-
-        private Task Parse(byte[] data, CancellationToken cancellationToken)
-        {
-            try
-            {
-                var message = _parserService.Parse(data);
-                if (message is null)
-                {
-                    _logger.LogDebug("Monitor {Ip}:{Port}: {Bytes} bytes that are not an HL7 message.",
-                        State.IpAddress, _port, data.Length);
-                }
-                else
-                {
-                    Interlocked.Increment(ref _messagesThisSession);
-                    _messageReceived(message);
-                }
-            }
-            catch (Exception ex)
-            {
-                // One message the parser or a subscriber chokes on must not
-                // take the whole connection down with it.
-                _logger.LogError(ex, "Monitor {Ip}:{Port}: dropped one message ({Bytes} bytes).",
-                    State.IpAddress, _port, data.Length);
-            }
-
-            return Task.CompletedTask;
-        }
-
-        public void Dispose()
-        {
-            if (Interlocked.Exchange(ref _disposed, 1) != 0)
-            {
-                return;
-            }
-
-            try
-            {
-                _cancellationTokenSource.Cancel();
-            }
-            catch (ObjectDisposedException)
-            {
-                // The run loop already finished and cleaned up after itself.
-            }
-        }
     }
 }

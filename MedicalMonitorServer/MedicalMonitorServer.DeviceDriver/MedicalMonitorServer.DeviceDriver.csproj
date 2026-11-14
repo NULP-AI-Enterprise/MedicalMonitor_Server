@@ -11,6 +11,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- MonitorConnection is internal: the retry and echo behaviour is driven from the test project. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>MedicalMonitorServer.DeviceDriver.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\MedicalMonitorServer.Contracts\MedicalMonitorServer.Contracts.csproj" />
   </ItemGroup>
 
