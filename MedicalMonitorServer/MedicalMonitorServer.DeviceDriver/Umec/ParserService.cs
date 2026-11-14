@@ -151,8 +151,8 @@ public class ParserService : IParserService
                 break;
 
             // ---- alarm setup per parameter, OBX-4 = parameter id (ORU msg 51/58/60)
-            case "2002": if (Setting(o) is { } s1) s1.HighLimit = ParseNumber(o.Value); break;
-            case "2003": if (Setting(o) is { } s2) s2.LowLimit = ParseNumber(o.Value); break;
+            case "2002": if (Setting(o) is { } s1) s1.HighLimit = ParseValidNumber(o.Value); break;
+            case "2003": if (Setting(o) is { } s2) s2.LowLimit = ParseValidNumber(o.Value); break;
             case "2004": if (Setting(o) is { } s3) s3.Enabled = ParseFlag(o.ValueCode); break;
             case "2009":
                 if (Setting(o) is { } s4)
@@ -247,7 +247,7 @@ public class ParserService : IParserService
         Label = o.Label,
         Unit = o.Units.Length > 0 ? o.Units
              : Parameters.TryGetValue(pid, out var d) ? d.Unit : "",
-        Value = IsValidValue(o.Value) ? ParseNumber(o.Value) : null,
+        Value = ParseValidNumber(o.Value),
         RawValue = o.Value,
         ModuleId = ParseInt(o.SubId),
         IsAperiodic = o.AccessCheck == "APERIODIC",
@@ -412,9 +412,18 @@ public class ParserService : IParserService
     };
 
     // Mindray "no valid measurement" sentinels.
-    private static readonly HashSet<string> Invalid = new() { "-100", "-1000", "-10000" };
+    private static readonly double[] InvalidValues = { -100, -1000, -10000 };
 
-    private static bool IsValidValue(string v) => !Invalid.Contains(v);
+    /// <summary>
+    /// Compared as numbers, not text, so "-100.0", "-100.00" and "-1e2" are caught too.
+    /// A value that is not a number at all is not valid either.
+    /// </summary>
+    private static bool IsValidValue(string v) =>
+        ParseNumber(v) is double d && !InvalidValues.Contains(d);
+
+    /// <summary>Number, or null when empty, not numeric or a "no value" sentinel.</summary>
+    private static double? ParseValidNumber(string v) =>
+        IsValidValue(v) ? ParseNumber(v) : null;
 
     private static string NameOf(int pid, string label)
     {
