@@ -21,6 +21,7 @@ public interface IComunicationService
         string ip,
         int port,
         Func<byte[], CancellationToken, Task> onMessageReceived,
+        Func<CancellationToken, Task>? onConnected = null,
         CancellationToken cancellationToken = default);
 
     Task ListenUdpBroadcastsAsync(
@@ -91,12 +92,18 @@ public class ComunicationService : IComunicationService
         string ip,
         int port,
         Func<byte[], CancellationToken, Task> onMessageReceived,
+        Func<CancellationToken, Task>? onConnected = null,
         CancellationToken cancellationToken = default)
     {
         Reset();
         using var client = new TcpClient();
         await client.ConnectAsync(ip, port, cancellationToken);
         using var stream = client.GetStream();
+        if (onConnected is not null)
+        {
+            await onConnected(cancellationToken);
+        }
+
         var buffer = new byte[16384];
 
         while (!cancellationToken.IsCancellationRequested)

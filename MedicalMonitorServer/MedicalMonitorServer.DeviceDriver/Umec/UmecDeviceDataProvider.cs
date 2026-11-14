@@ -11,6 +11,8 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
 
     public event Action<IDeviceDataProvider, DeviceState>? OnDeviceConnected;
 
+    public event Action<IDeviceDataProvider, DeviceState>? OnDeviceDisconnected;
+
     public event Action<UmecMessage>? OnMessageReceived;
 
     public IReadOnlyCollection<DeviceState> ConnectedDevices =>
@@ -33,10 +35,14 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
             return;
         }
 
-        var connection = new MonitorConnection(deviceState, port, OnMessage);
+        var connection = new MonitorConnection(
+            deviceState,
+            port,
+            OnMessage,
+            state => OnDeviceConnected?.Invoke(this, state),
+            OnConnectionEnded);
         if (_connections.TryAdd(deviceState.IpAddress, connection))
         {
-            OnDeviceConnected?.Invoke(this, deviceState);
             connection.Start();
         }
         else
@@ -75,6 +81,20 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
         OnMessageReceived?.Invoke(message);
     }
 
+    private void OnConnectionEnded(MonitorConnection connection, bool wasConnected)
+    {
+        if (_connections.TryGetValue(connection.State.IpAddress, out var current) &&
+            ReferenceEquals(current, connection))
+        {
+            _connections.TryRemove(connection.State.IpAddress, out _);
+        }
+
+        if (wasConnected)
+        {
+            OnDeviceDisconnected?.Invoke(this, connection.State);
+        }
+    }
+
     public void Dispose()
     {
         foreach (var connection in _connections.Values)
@@ -91,14 +111,23 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
         private readonly ComunicationService _communicationService = new();
         private readonly ParserService _parserService;
         private readonly Action<UmecMessage> _messageReceived;
+        private readonly Action<DeviceState> _connected;
+        private readonly Action<MonitorConnection, bool> _ended;
         private readonly int _port;
 
-        public MonitorConnection(DeviceState state, int port, Action<UmecMessage> messageReceived)
+        public MonitorConnection(
+            DeviceState state,
+            int port,
+            Action<UmecMessage> messageReceived,
+            Action<DeviceState> connected,
+            Action<MonitorConnection, bool> ended)
         {
             State = state;
             _port = port;
             _parserService = new ParserService();
             _messageReceived = messageReceived;
+            _connected = connected;
+            _ended = ended;
         }
 
         public DeviceState State { get; }
@@ -110,16 +139,27 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
 
         private async Task RunAsync()
         {
+            var wasConnected = false;
             try
             {
                 await _communicationService.ReadTcpStreamAsync(
                     State.IpAddress,
                     _port,
                     Parse,
+                    cancellationToken =>
+                    {
+                        wasConnected = true;
+                        _connected(State);
+                        return Task.CompletedTask;
+                    },
                     _cancellationTokenSource.Token);
             }
             catch (OperationCanceledException) when (_cancellationTokenSource.IsCancellationRequested)
             {
+            }
+            finally
+            {
+                _ended(this, wasConnected);
             }
         }
 
