@@ -69,7 +69,18 @@ public record AlertDto(
     public static string BuildId(string patientId, VitalSignType vitalSign) => $"{patientId}:{vitalSign}";
 }
 
-public record HealthDto(string Status, DateTimeOffset Timestamp, int ActivePatients, int ConnectedStations);
+/// <param name="Status">"Healthy" (fresh data), "Degraded" (data stale or none yet) or "Unhealthy" (patients on the roster but no data and no monitor connected).</param>
+/// <param name="ConnectedMonitors">Bedside monitors (uMec devices) currently connected.</param>
+/// <param name="LastDataAt">When the last vitals reading arrived; null if none since startup.</param>
+/// <param name="DataAgeSeconds">Seconds since <paramref name="LastDataAt"/>; null if none since startup.</param>
+public record HealthDto(
+    string Status,
+    DateTimeOffset Timestamp,
+    int ActivePatients,
+    int ConnectedStations,
+    int ConnectedMonitors = 0,
+    DateTimeOffset? LastDataAt = null,
+    double? DataAgeSeconds = null);
 
 public static class VitalSignLabels
 {

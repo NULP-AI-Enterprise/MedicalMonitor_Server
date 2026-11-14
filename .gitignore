@@ -434,3 +434,6 @@ Parser/read
 # keep the captured HL7 samples used as test fixtures (the VS template ignores *.log)
 !Parser/hl7_messages/*.log
 .vscode/
+
+# Captured HL7 test fixtures
+!**/Fixtures/*.log

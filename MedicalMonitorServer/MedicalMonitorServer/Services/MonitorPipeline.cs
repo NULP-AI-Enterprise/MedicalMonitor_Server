@@ -46,17 +46,20 @@ public sealed class MonitorPipeline : IMonitorPipeline
     private readonly IHubContext<VitalsHub> _hub;
     private readonly IPatientRegistry _patients;
     private readonly IAlertStateService _alerts;
+    private readonly FeedStatus _feed;
     private readonly ILogger<MonitorPipeline> _logger;
 
     public MonitorPipeline(
         IHubContext<VitalsHub> hub,
         IPatientRegistry patients,
         IAlertStateService alerts,
+        FeedStatus feed,
         ILogger<MonitorPipeline> logger)
     {
         _hub = hub;
         _patients = patients;
         _alerts = alerts;
+        _feed = feed;
         _logger = logger;
     }
 
@@ -116,6 +119,7 @@ public sealed class MonitorPipeline : IMonitorPipeline
             return;
         }
 
+        _feed.MarkReceived();
         var merged = _patients.MergeReadings(patientId, readings);
 
         var update = new MonitorUpdateDto(
