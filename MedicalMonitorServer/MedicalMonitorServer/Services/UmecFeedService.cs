@@ -74,6 +74,20 @@ public sealed class UmecFeedService : BackgroundService
         var info = message.Oru?.Patient ?? message.Adt?.Patient;
         var oru = message.Oru;
 
+        if (_logger.IsEnabled(LogLevel.Debug))
+        {
+            // Raw values as the monitor sent them, before sentinels (-100 etc.) become null.
+            _logger.LogDebug("uMec msg {MessageId} ({Kind}) from {Ip}: vitals [{Vitals}] alarms [{Alarms}]",
+                message.MessageId, message.Kind, message.SourceIp,
+                string.Join(", ", oru?.Vitals.Select(v => $"{v.ParameterId} {v.Name}={v.RawValue}") ?? []),
+                string.Join(", ", oru?.Alarms.Select(a => $"{a.AlarmId}:{a.Text}") ?? []));
+
+            if (message.Kind == UmecMessageKind.Unknown)
+            {
+                _logger.LogDebug("uMec raw {MessageId}: {Raw}", message.MessageId, message.Raw.Replace("\r", " ¦ "));
+            }
+        }
+
         var readings = oru is { Vitals.Count: > 0 } ? ToReadings(oru.Vitals) : new VitalReadings();
         var hasReadings = readings != new VitalReadings();
 
