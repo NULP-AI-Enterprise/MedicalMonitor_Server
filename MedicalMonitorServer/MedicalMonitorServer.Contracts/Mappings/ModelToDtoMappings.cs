@@ -14,13 +14,6 @@ public static class ModelToDtoMappings
         State = model.State.ToDto(),
     };
 
-    public static PatientDataDto ToDto(this PatientData model) => new()
-    {
-        PatientId = model.PatientId,
-        Name = model.Name,
-        Values = model.Values.ToDictionary(entry => entry.Key, entry => entry.Value),
-    };
-
     public static PatientInfoDto ToDto(this PatientInfo model) => new()
     {
         PatientId = model.PatientId,
