@@ -202,6 +202,12 @@ public sealed class MonitorPipeline : IMonitorPipeline
 
     public async Task IngestAlertAsync(AlertDto alert, CancellationToken ct = default)
     {
+        if (_patients.Get(alert.PatientId) is null)
+        {
+            _logger.LogDebug("Alert for unknown patient {PatientId} ignored.", alert.PatientId);
+            return;
+        }
+
         var raised = _alerts.Raise(alert);
         if (raised is not null)
         {
