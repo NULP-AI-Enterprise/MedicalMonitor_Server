@@ -19,6 +19,14 @@ public sealed class ApiKeyOptions
     /// <summary>Key for state-changing actions (patients CRUD, acknowledging alerts).</summary>
     public string? OperatorKey { get; set; }
 
+    /// <summary>
+    /// Treat hub connections from this machine (loopback) as operators without a key, so the
+    /// nurse-station web UI (StationUi:Path) can silence alerts. Stations elsewhere on the
+    /// LAN still need the operator key. Turn off if a reverse proxy runs on this machine,
+    /// since every proxied client would then look local.
+    /// </summary>
+    public bool TrustLocalStations { get; set; } = true;
+
     public static bool Matches(string? provided, string? expected)
     {
         if (string.IsNullOrEmpty(provided) || string.IsNullOrEmpty(expected)) return false;
