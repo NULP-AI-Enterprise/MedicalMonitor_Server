@@ -7,6 +7,7 @@ using MedicalMonitorServer;
 using MedicalMonitorServer.Contracts.Api;
 using MedicalMonitorServer.Core.Monitoring;
 using MedicalMonitorServer.DeviceDriver;
+using MedicalMonitorServer.DeviceDriver.Umec;
 using MedicalMonitorServer.Hubs;
 using MedicalMonitorServer.Security;
 using MedicalMonitorServer.Services;
@@ -54,6 +55,20 @@ builder.Services.AddSingleton(serviceProvider =>
     return options;
 });
 builder.Services.AddSingleton<IWatchDogService, WatchDogService>();
+
+// Link timings of the uMec driver. TimeSpan values bind from "hh:mm:ss" strings,
+// so the section uses that form. A bare number does NOT throw — it binds as a
+// number of DAYS ("ReadTimeout": 10 means ten days) — which is why
+// UmecLinkOptions.Validate rejects anything outside a sane range.
+builder.Services.AddSingleton(serviceProvider =>
+{
+    var options = new UmecLinkOptions();
+    serviceProvider
+        .GetRequiredService<IConfiguration>()
+        .GetSection("Umec")
+        .Bind(options);
+    return options;
+});
 builder.Services.AddSingleton<DeviceService>();
 builder.Services.AddHostedService<WatchDogHostedService>();
 builder.Services.AddFastEndpoints();
