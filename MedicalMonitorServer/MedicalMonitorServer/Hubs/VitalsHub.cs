@@ -68,10 +68,8 @@ public class VitalsHub : Hub
         var http = Context.GetHttpContext();
         var key = http?.Request.Headers[ApiKeyOptions.HeaderName].ToString();
         if (string.IsNullOrEmpty(key)) key = http?.Request.Query["access_token"].ToString();
-        var remote = http?.Connection.RemoteIpAddress;
-        var isLocal = remote is not null && System.Net.IPAddress.IsLoopback(remote);
         Context.Items[OperatorItem] = ApiKeyOptions.Matches(key, _keys.OperatorKey)
-            || (_keys.TrustLocalStations && isLocal);
+            || _keys.IsTrustedLocal(http);
 
         _connections.Increment();
         _logger.LogInformation("Station connected: {ConnectionId}", Context.ConnectionId);

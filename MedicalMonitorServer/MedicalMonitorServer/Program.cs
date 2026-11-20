@@ -134,7 +134,13 @@ if (!string.IsNullOrWhiteSpace(stationUiPath))
     {
         var files = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(root);
         app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
-        app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            FileProvider = files,
+            // Revalidate on every load (cheap: 304 by ETag). Without it a browser may keep a
+            // stale index.html next to a new app.js after the UI is updated, and break.
+            OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache",
+        });
         app.Logger.LogInformation("Serving the station UI from {Path}", root);
     }
     else

@@ -20,12 +20,31 @@ public sealed class ApiKeyOptions
     public string? OperatorKey { get; set; }
 
     /// <summary>
-    /// Treat hub connections from this machine (loopback) as operators without a key, so the
-    /// nurse-station web UI (StationUi:Path) can silence alerts. Stations elsewhere on the
-    /// LAN still need the operator key. Turn off if a reverse proxy runs on this machine,
-    /// since every proxied client would then look local.
+    /// Treat requests from this machine (loopback) as the operator without a key, so the
+    /// nurse-station web UI (StationUi:Path) can silence alerts and manage patients. Covers
+    /// the hub and the operator REST routes, never ingestion. Stations elsewhere on the LAN
+    /// still need the operator key. Turn off if a reverse proxy runs on this machine, since
+    /// every proxied client would then look local.
     /// </summary>
     public bool TrustLocalStations { get; set; } = true;
+
+    /// <summary>
+    /// Whether <paramref name="http"/> comes from a trusted local station: loopback, and not
+    /// sent by a web page of another site. Any page open in a browser on this machine also
+    /// connects from loopback, so a request whose Origin is not this machine is refused.
+    /// Browsers always send Origin on cross-site writes and WebSocket handshakes; a request
+    /// without one comes from a tool on this machine, not from a web page.
+    /// </summary>
+    public bool IsTrustedLocal(HttpContext? http)
+    {
+        if (!TrustLocalStations || http is null) return false;
+        if (http.Connection.RemoteIpAddress is not { } remote || !System.Net.IPAddress.IsLoopback(remote)) return false;
+
+        var origin = http.Request.Headers.Origin.ToString();
+        if (string.IsNullOrEmpty(origin)) return true;
+        return Uri.TryCreate(origin, UriKind.Absolute, out var uri)
+            && uri.Host is "localhost" or "127.0.0.1" or "::1" or "[::1]";
+    }
 
     public static bool Matches(string? provided, string? expected)
     {
@@ -39,7 +58,8 @@ public sealed class ApiKeyOptions
 }
 
 /// <summary>
-/// Ingestion routes need the ingestion key; any other non-read /api request needs the operator key.
+/// Ingestion routes need the ingestion key; any other non-read /api request needs the operator key,
+/// except from a trusted local station (see <see cref="ApiKeyOptions.IsTrustedLocal"/>).
 /// Read-only GETs stay open for the nurse stations.
 /// </summary>
 public sealed class ApiKeyMiddleware
@@ -57,8 +77,12 @@ public sealed class ApiKeyMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        var expected = RequiredKey(context.Request);
-        if (expected is not null &&
+        var (expected, isOperatorRoute) = RequiredKey(context.Request);
+
+        // The station on this machine manages patients without a key; ingestion never skips it.
+        var trustedLocal = isOperatorRoute && _options.IsTrustedLocal(context);
+
+        if (expected is not null && !trustedLocal &&
             !ApiKeyOptions.Matches(context.Request.Headers[ApiKeyOptions.HeaderName].ToString(), expected))
         {
             _logger.LogWarning("Rejected {Method} {Path} from {Remote}: missing or invalid API key.",
@@ -71,16 +95,17 @@ public sealed class ApiKeyMiddleware
         await _next(context);
     }
 
-    private string? RequiredKey(HttpRequest request)
+    /// <returns>The key the request needs (null: none) and whether it is an operator route.</returns>
+    private (string? Key, bool IsOperatorRoute) RequiredKey(HttpRequest request)
     {
         var path = request.Path;
         if (path.StartsWithSegments("/api/v1/ingestion", StringComparison.OrdinalIgnoreCase))
-            return _options.IngestionKey;
+            return (_options.IngestionKey, false);
 
         if (path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase) &&
             !HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method) && !HttpMethods.IsOptions(request.Method))
-            return _options.OperatorKey;
+            return (_options.OperatorKey, true);
 
-        return null;
+        return (null, false);
     }
 }
