@@ -50,6 +50,20 @@ public interface IMonitorPipeline
     /// <summary>Registers a device-reported alert. Broadcasts AlertTriggered when it is new or changed severity.</summary>
     Task IngestAlertAsync(AlertDto alert, CancellationToken ct = default);
 
+    /// <summary>
+    /// Applies the complete set of patients whose monitor has stopped sending anything.
+    /// A patient new to the set gets a critical technical alert and has the vitals snapshot
+    /// dropped (broadcast as a frame of nulls, the contract's "no data"), so the last numbers
+    /// are not shown as current. A patient no longer in the set has the alert cleared.
+    /// The patient's other alerts are left alone: nobody is observing them any more, but
+    /// quietly dismissing a clinical alarm is worse than leaving it up.
+    /// </summary>
+    /// <param name="silentByPatient">Patient id to the binding of the monitor that went silent.</param>
+    Task ReconcileMonitorSilenceAsync(
+        IReadOnlyDictionary<string, MonitorBindingDto> silentByPatient,
+        DateTimeOffset now,
+        CancellationToken ct = default);
+
     Task<AlertDto?> AcknowledgeAlertAsync(string alertId, CancellationToken ct = default);
 }
 
@@ -202,11 +216,77 @@ public sealed class MonitorPipeline : IMonitorPipeline
 
     public async Task IngestAlertAsync(AlertDto alert, CancellationToken ct = default)
     {
+        if (_patients.Get(alert.PatientId) is null)
+        {
+            _logger.LogDebug("Alert for unknown patient {PatientId} ignored.", alert.PatientId);
+            return;
+        }
+
         var raised = _alerts.Raise(alert);
         if (raised is not null)
         {
             LogAlert("raised", raised);
             await _hub.Clients.All.SendAsync(HubMethods.AlertTriggered, raised, ct);
+        }
+    }
+
+    public async Task ReconcileMonitorSilenceAsync(
+        IReadOnlyDictionary<string, MonitorBindingDto> silentByPatient,
+        DateTimeOffset now,
+        CancellationToken ct = default)
+    {
+        foreach (var (patientId, monitor) in silentByPatient)
+        {
+            var patient = _patients.Get(patientId);
+            if (patient is null) continue;
+
+            // Shaped like any technical alarm of the device, which is what stations already
+            // render. Raise returns null while the alert is already up, so the reset and the
+            // broadcasts below happen once per episode and an acknowledgement is kept.
+            var raised = _alerts.Raise(new AlertDto(
+                AlertDto.BuildMonitorSilentId(patientId),
+                patientId,
+                VitalSign: null,
+                AlertDto.SeverityOf(DeviceAlarmLevel.High),
+                $"Monitor {monitor.MonitorIp} is not sending data",
+                Value: null,
+                now,
+                Source: AlertSource.Device,
+                Code: AlertDto.MonitorSilentCode,
+                Level: DeviceAlarmLevel.High,
+                Category: AlertCategory.Technical));
+            if (raised is null) continue;
+
+            LogAlert("raised", raised);
+            await _hub.Clients.All.SendAsync(HubMethods.AlertTriggered, raised, ct);
+
+            // Not through IngestReadingsAsync: that would mark the feed as fresh for /health.
+            _patients.ResetReadings(patientId);
+            await _hub.Clients.All.SendAsync(
+                HubMethods.ReceiveVitals,
+                new MonitorUpdateDto(
+                    patient.PatientId,
+                    patient.PatientName,
+                    patient.BedNumber,
+                    new VitalReadings().ToDto(),
+                    Array.Empty<WaveformSampleDto>(),
+                    now,
+                    _patients.GetWaveformChannels(patientId)),
+                ct);
+        }
+
+        // By alert, not by binding: a patient whose monitor came back naming somebody else
+        // is bound to nothing any more, and would otherwise keep this alert for good.
+        foreach (var alert in _alerts.GetActiveAlerts())
+        {
+            if (alert.AlertId != AlertDto.BuildMonitorSilentId(alert.PatientId)) continue;
+            if (silentByPatient.ContainsKey(alert.PatientId)) continue;
+
+            if (_alerts.Clear(alert.AlertId) is { } cleared)
+            {
+                LogAlert("cleared", cleared);
+                await _hub.Clients.All.SendAsync(HubMethods.AlertCleared, cleared, ct);
+            }
         }
     }
 
