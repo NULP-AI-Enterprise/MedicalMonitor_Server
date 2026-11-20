@@ -31,6 +31,7 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
     {
         _logger = logger ?? NullLogger<UmecDeviceDataProvider>.Instance;
         _options = options ?? new UmecLinkOptions();
+        _options.Validate();
         _readerFactory = readerFactory ?? (log => new ComunicationService(log)
         {
             ReadTimeout = _options.ReadTimeout,

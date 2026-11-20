@@ -40,8 +40,8 @@ public class UmecLinkOptionsTests
     [Fact]
     public void The_configuration_section_binds_every_timing()
     {
-        // TimeSpan binds from "hh:mm:ss" only. A bare number throws, and a bare
-        // numeric *string* silently means days, so the appsettings form is pinned here.
+        // TimeSpan binds from "hh:mm:ss". A bare number does not throw, it means
+        // days, so the appsettings form is pinned here and Validate catches the rest.
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -128,6 +128,73 @@ public class UmecLinkOptionsTests
         cts.Cancel();
         listener.Stop();
         lock (clients) { foreach (var c in clients) c.Dispose(); }
+    }
+
+    // --------------------------------------------------------------- validation
+
+    [Fact]
+    public void A_bare_number_in_configuration_is_rejected_rather_than_meaning_days()
+    {
+        // "10" binds to TimeSpan.FromDays(10). Left unchecked it would silently
+        // disable the only detector of a monitor that went silent.
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Umec:ReadTimeout"] = "10" })
+            .Build();
+
+        var options = new UmecLinkOptions();
+        configuration.GetSection("Umec").Bind(options);
+
+        Assert.Equal(TimeSpan.FromDays(10), options.ReadTimeout);        // what binding really does
+        var failure = Assert.Throws<InvalidOperationException>(options.Validate);
+        Assert.Contains("ReadTimeout", failure.Message);
+        Assert.Contains("days", failure.Message);
+    }
+
+    [Theory]
+    [InlineData("00:00:00")]
+    [InlineData("-00:00:10")]
+    [InlineData("10")]
+    public void An_unusable_read_timeout_is_rejected(string value)
+    {
+        // Zero times out instantly and a negative makes CancelAfter throw on
+        // every connect, so neither may reach the reader.
+        var options = new UmecLinkOptions { ReadTimeout = TimeSpan.Parse(value) };
+
+        Assert.Throws<InvalidOperationException>(options.Validate);
+    }
+
+    [Fact]
+    public void An_unusable_connect_timeout_is_rejected()
+    {
+        Assert.Throws<InvalidOperationException>(
+            new UmecLinkOptions { ConnectTimeout = TimeSpan.Zero }.Validate);
+        Assert.Throws<InvalidOperationException>(
+            new UmecLinkOptions { ConnectTimeout = TimeSpan.FromSeconds(-1) }.Validate);
+        Assert.Throws<InvalidOperationException>(
+            new UmecLinkOptions { ConnectTimeout = TimeSpan.FromDays(10) }.Validate);
+    }
+
+    [Fact]
+    public void A_session_limit_below_one_is_rejected()
+    {
+        Assert.Throws<InvalidOperationException>(
+            new UmecLinkOptions { MaxFailedSessions = 0 }.Validate);
+    }
+
+    [Fact]
+    public void The_shipped_defaults_validate()
+    {
+        new UmecLinkOptions().Validate();           // must not throw
+    }
+
+    [Fact]
+    public void The_provider_rejects_unusable_options_when_it_is_built()
+    {
+        // Caught where the options are used, so a bad section fails at startup
+        // rather than on the first monitor that comes online.
+        Assert.Throws<InvalidOperationException>(() => new UmecDeviceDataProvider(
+            logger: null,
+            options: new UmecLinkOptions { ReadTimeout = TimeSpan.FromDays(10) }));
     }
 
     /// <summary>

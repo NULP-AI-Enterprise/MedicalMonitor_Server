@@ -57,7 +57,9 @@ builder.Services.AddSingleton(serviceProvider =>
 builder.Services.AddSingleton<IWatchDogService, WatchDogService>();
 
 // Link timings of the uMec driver. TimeSpan values bind from "hh:mm:ss" strings,
-// so the section uses that form; a bare number would throw at startup.
+// so the section uses that form. A bare number does NOT throw — it binds as a
+// number of DAYS ("ReadTimeout": 10 means ten days) — which is why
+// UmecLinkOptions.Validate rejects anything outside a sane range.
 builder.Services.AddSingleton(serviceProvider =>
 {
     var options = new UmecLinkOptions();

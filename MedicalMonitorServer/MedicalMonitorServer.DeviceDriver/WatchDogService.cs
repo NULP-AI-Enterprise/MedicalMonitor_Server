@@ -41,6 +41,16 @@ public class WatchDogService : IWatchDogService
     /// <summary>Addresses already reported as skipped, so a held link is logged once, not every scan.</summary>
     private readonly HashSet<string> _loggedSkips = new(StringComparer.Ordinal);
 
+    /// <summary>Addresses whose ownership check has already been reported as broken.</summary>
+    private readonly HashSet<string> _loggedCheckFailures = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// One transition, captured by value. A <see cref="DeviceState"/> is shared with
+    /// the driver and mutated from link threads, so holding the object until after
+    /// the loop could log the opposite of what was actually observed.
+    /// </summary>
+    private readonly record struct Transition(string Ip, string Port, DeviceStateEnum State);
+
     /// <param name="logger">Logger for state transitions; omit to log nothing.</param>
     public WatchDogService(WatchDogOptions options, ILogger<WatchDogService>? logger = null)
     {
@@ -68,7 +78,7 @@ public class WatchDogService : IWatchDogService
             // Transitions are logged after the loop: the factories below run under
             // the dictionary's bucket lock, which already carries OnDeviceStateChanged
             // (see item 9) and must not be given more work.
-            var transitions = new List<DeviceState>();
+            var transitions = new List<Transition>();
 
             foreach (var currentState in results)
             {
@@ -80,7 +90,8 @@ public class WatchDogService : IWatchDogService
                         // and the scanned range is mostly empty.
                         if (currentState.State == DeviceStateEnum.Connected)
                         {
-                            transitions.Add(currentState);
+                            transitions.Add(new Transition(
+                                currentState.IpAddress, currentState.Port, currentState.State));
                         }
 
                         OnDeviceStateChanged?.Invoke(currentState);
@@ -91,7 +102,8 @@ public class WatchDogService : IWatchDogService
                         if (existingState.State != currentState.State)
                         {
                             existingState.State = currentState.State;
-                            transitions.Add(existingState);
+                            transitions.Add(new Transition(
+                                existingState.IpAddress, existingState.Port, currentState.State));
                             OnDeviceStateChanged?.Invoke(existingState);
                         }
                         return existingState;
@@ -129,9 +141,20 @@ public class WatchDogService : IWatchDogService
             // exception would stop the whole server, so a broken check is logged
             // and we fall back to probing: a flap is recoverable and visible,
             // whereas suppressing an address forever is silent.
-            _logger.LogError(ex, "The link-ownership check for {Ip} failed; probing it anyway.", ip);
-            owned = false;
+            // Reported once per address, because this would otherwise fire on
+            // every scan — eleven times a second on the shipped range — and roll
+            // the alarm history out of the log file. Returning early also keeps
+            // us out of the release path below, which would claim the driver let
+            // go of a link it may well still be holding.
+            if (_loggedCheckFailures.Add(ip))
+            {
+                _logger.LogError(ex, "The link-ownership check for {Ip} failed; probing it anyway.", ip);
+            }
+
+            return false;
         }
+
+        _loggedCheckFailures.Remove(ip);
 
         if (!owned)
         {
@@ -154,15 +177,15 @@ public class WatchDogService : IWatchDogService
         return true;
     }
 
-    private void Report(DeviceState state)
+    private void Report(Transition transition)
     {
-        if (state.State == DeviceStateEnum.Connected)
+        if (transition.State == DeviceStateEnum.Connected)
         {
-            _logger.LogInformation("Monitor {Ip}:{Port} answered a probe.", state.IpAddress, state.Port);
+            _logger.LogInformation("Monitor {Ip}:{Port} answered a probe.", transition.Ip, transition.Port);
         }
         else
         {
-            _logger.LogWarning("Monitor {Ip}:{Port} did not answer a probe.", state.IpAddress, state.Port);
+            _logger.LogWarning("Monitor {Ip}:{Port} did not answer a probe.", transition.Ip, transition.Port);
         }
     }
 

@@ -42,4 +42,37 @@ public sealed record UmecLinkOptions
     /// watchdog's view of it — stuck for minutes per attempt.
     /// </summary>
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Rejects values that configuration can produce but the driver cannot use.
+    /// Worth doing because the failure modes are quiet: a TimeSpan binds from
+    /// "hh:mm:ss", so <c>"ReadTimeout": 10</c> means ten <em>days</em> and would
+    /// silently disable the only detector of a silently-dead monitor, while a
+    /// negative value makes every connect throw. Upper bounds are deliberately
+    /// generous — they exist to catch a mistyped unit, not to police tuning.
+    /// </summary>
+    public void Validate()
+    {
+        Positive(ReconnectDelay, nameof(ReconnectDelay), TimeSpan.FromMinutes(5));
+        Positive(EchoInterval, nameof(EchoInterval), TimeSpan.FromMinutes(1));
+        Positive(QueryRefreshInterval, nameof(QueryRefreshInterval), TimeSpan.FromMinutes(10));
+        Positive(ReadTimeout, nameof(ReadTimeout), TimeSpan.FromMinutes(10));
+        Positive(ConnectTimeout, nameof(ConnectTimeout), TimeSpan.FromMinutes(1));
+
+        if (MaxFailedSessions < 1)
+        {
+            throw new InvalidOperationException(
+                $"Umec:{nameof(MaxFailedSessions)} must be at least 1, but was {MaxFailedSessions}.");
+        }
+
+        static void Positive(TimeSpan value, string name, TimeSpan max)
+        {
+            if (value <= TimeSpan.Zero || value > max)
+            {
+                throw new InvalidOperationException(
+                    $"Umec:{name} must be greater than zero and at most {max}, but was {value}. " +
+                    "Configuration binds a TimeSpan from \"hh:mm:ss\", so a bare number means days.");
+            }
+        }
+    }
 }

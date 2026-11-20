@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using MedicalMonitorServer.Contracts.Models;
 using MedicalMonitorServer.DeviceDriver;
+using Microsoft.Extensions.Logging;
 
 namespace MedicalMonitorServer.DeviceDriver.Tests;
 
@@ -270,6 +271,83 @@ public class WatchDogServiceTests : IDisposable
         }
 
         Assert.Equal(0, accepted());        // the owned one was left alone
+    }
+
+    [Fact]
+    public async Task A_broken_ownership_check_is_reported_once_not_once_per_scan()
+    {
+        // This runs eleven times a second on the shipped range, so an undeduped
+        // error would roll the alarm history out of the log file within a day.
+        var (_, port, _) = Listen();
+        var logger = new CapturingLogger();
+        var service = new WatchDogService(Options(port), logger)
+        {
+            IsLinkOwned = _ => throw new InvalidOperationException("ownership check is broken"),
+        };
+
+        _ = Task.Run(() => service.StartWatchDog(_cts.Token));
+        await Task.Delay(300);              // ~15 scans
+
+        var failures = logger.Entries
+            .Where(e => e.Level == LogLevel.Error && e.Message.Contains("ownership check"))
+            .ToList();
+
+        Assert.Single(failures);
+
+        // And it must not pretend the driver let go of a link it may still hold.
+        Assert.DoesNotContain(logger.Entries, e => e.Message.Contains("released its HL7 link"));
+    }
+
+    [Fact]
+    public async Task A_held_link_is_reported_skipped_once_and_its_release_once()
+    {
+        var (_, port, _) = Listen();
+        bool owned = true;
+        var logger = new CapturingLogger();
+        var service = new WatchDogService(Options(port), logger)
+        {
+            IsLinkOwned = _ => Volatile.Read(ref owned),
+        };
+
+        _ = Task.Run(() => service.StartWatchDog(_cts.Token));
+        await Wait.UntilAsync(
+            () => logger.Entries.Any(e => e.Message.Contains("skipping the probe")),
+            "the held link is reported");
+        await Task.Delay(200);              // many more scans, no repeats
+
+        Assert.Single(logger.Entries, e => e.Message.Contains("skipping the probe"));
+
+        Volatile.Write(ref owned, false);
+        await Wait.UntilAsync(
+            () => logger.Entries.Any(e => e.Message.Contains("released its HL7 link")),
+            "the release is reported");
+        await Task.Delay(100);
+
+        Assert.Single(logger.Entries, e => e.Message.Contains("released its HL7 link"));
+    }
+
+    private sealed class CapturingLogger : ILogger<WatchDogService>
+    {
+        private readonly List<(LogLevel Level, string Message)> _entries = new();
+
+        public IReadOnlyList<(LogLevel Level, string Message)> Entries
+        {
+            get { lock (_entries) { return _entries.ToArray(); } }
+        }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            lock (_entries) { _entries.Add((logLevel, formatter(state, exception))); }
+        }
     }
 
     [Fact]

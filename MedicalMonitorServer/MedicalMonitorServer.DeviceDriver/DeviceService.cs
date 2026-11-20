@@ -22,11 +22,18 @@ public class DeviceService : IDeviceService
     {
         _watchDogService = watchDogService;
 
-        _deviceDataProviders.AddRange(providers ?? new IDeviceDataProvider[]
-        {
-            new UmecDeviceDataProvider(
-                loggerFactory?.CreateLogger<UmecDeviceDataProvider>(), linkOptions),
-        });
+        // Null-or-empty, not just null: Microsoft DI resolves IEnumerable<T> to an
+        // EMPTY ARRAY when no T is registered, so a plain ?? would leave this
+        // service with no providers at all — no link, no data, and an ownership
+        // check that always answers false.
+        var supplied = providers?.Where(provider => provider is not null).ToArray();
+        _deviceDataProviders.AddRange(supplied is { Length: > 0 }
+            ? supplied
+            : new IDeviceDataProvider[]
+            {
+                new UmecDeviceDataProvider(
+                    loggerFactory?.CreateLogger<UmecDeviceDataProvider>(), linkOptions),
+            });
 
         foreach (var provider in _deviceDataProviders){
             provider.OnDeviceConnected += OnDeviceConnected;
