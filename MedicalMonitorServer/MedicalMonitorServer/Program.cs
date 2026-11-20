@@ -115,6 +115,7 @@ builder.Services.AddSingleton<ConnectionTracker>();
 builder.Services.AddSingleton<FeedStatus>();
 builder.Services.AddSingleton<IMonitorPipeline, MonitorPipeline>();
 builder.Services.AddHostedService<UmecFeedService>();
+builder.Services.AddHostedService<MonitorSilenceService>();
 
 var app = builder.Build();
 

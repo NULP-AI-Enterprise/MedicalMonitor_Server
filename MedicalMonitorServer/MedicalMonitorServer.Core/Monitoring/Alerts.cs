@@ -183,6 +183,9 @@ public interface IAlertStateService
 
     AlertDto? Acknowledge(string alertId);
 
+    /// <summary>Removes one alert. Returns it when it was active, null when there was nothing to remove.</summary>
+    AlertDto? Clear(string alertId);
+
     IReadOnlyList<AlertDto> GetActiveAlerts();
 
     IReadOnlyList<AlertDto> ClearForPatient(string patientId);
@@ -283,6 +286,16 @@ public sealed class AlertStateService : IAlertStateService
             var acknowledged = existing with { IsAcknowledged = true };
             _active[alertId] = acknowledged;
             return acknowledged;
+        }
+    }
+
+    public AlertDto? Clear(string alertId)
+    {
+        if (string.IsNullOrWhiteSpace(alertId)) return null;
+
+        lock (_lock)
+        {
+            return _active.TryRemove(alertId, out var removed) ? removed : null;
         }
     }
 
