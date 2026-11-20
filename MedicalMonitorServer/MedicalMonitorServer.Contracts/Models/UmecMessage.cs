@@ -43,6 +43,9 @@ public enum UmecMessageKind
 
     /// <summary>Any other ADT message (admit / discharge / transfer).</summary>
     AdtEvent,
+
+    /// <summary>A block of waveform samples of one channel (msg 157); sent only for channels the start query asks for.</summary>
+    Waveforms,
 }
 
 /// <summary>
@@ -110,8 +113,11 @@ public sealed class UmecVitalsMessage
 
     public AlarmSystemStatus? AlarmSystem { get; set; }
 
-    /// <summary>Waveform channel descriptors (OBX 2153). The HL7 stream carries no samples, only these.</summary>
+    /// <summary>Waveform channel descriptors (OBX 2153): how to read the samples of a channel.</summary>
     public List<WaveChannel> WaveChannels { get; set; } = new();
+
+    /// <summary>Waveform samples (ZMW segments of msg 157), one entry per channel block.</summary>
+    public List<WaveSamples> WaveSamples { get; set; } = new();
 
     public List<UmecObservation> Observations { get; set; } = new();
 }

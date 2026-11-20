@@ -24,14 +24,25 @@ public static class UmecRequests
     /// (see <see cref="UmecLinkOptions.QueryRefreshInterval"/>), and never in demo mode.
     /// QRF filter = &lt;IP&gt;&amp;&lt;IPSeq&gt;^&lt;SendType&gt;^&lt;SendFreq s&gt;^&lt;SendAll&gt;^&lt;List&gt;;
     /// IP/IPSeq are 0 for a direct monitor link. SendType 1 = parameters,
-    /// 3 = physiological alarms, 4 = technical alarms.
+    /// 2 = waveforms, 3 = physiological alarms, 4 = technical alarms.
     /// QRD-1 only has to be a valid timestamp; QRD-4 is any id under 16 bytes.
+    /// </para>
+    /// <para>
+    /// SendType 2 is "reserved" in revision 14 of the guide, although its own QRF example
+    /// (6.9.5) still uses it with a list of 1101&amp;1151&amp;1152. Verified on a live uMec10
+    /// (SW 01.10.00): with this line the monitor adds ORU^R01 id 157 once a second, one
+    /// message per listed channel carrying that second's samples in a ZMW segment (see
+    /// <c>ParserService</c>); without it no samples are sent at all. The list holds channel
+    /// ids as in OBX 2153, here the three a station draws: 1101 = ECG channel 1 (lead II
+    /// unless changed on the monitor), 1151 = respiration, 1152 = Pleth. "Send all" is
+    /// defined for parameters only, so the channels are named.
     /// </para>
     /// </summary>
     public const string StartDataQueryText =
         "MSH|^~\\&|||||||QRY^R02|1203|P|2.3.1\r" +
         "QRD|20060731145557|R|I|MMSQRY|||||RES\r" +
         "QRF|MON||||0&0^1^1^1^\r" +
+        "QRF|MON||||0&0^2^1^0^1101&1151&1152\r" +
         "QRF|MON||||0&0^3^1^1^\r" +
         "QRF|MON||||0&0^4^1^1^\r";
 

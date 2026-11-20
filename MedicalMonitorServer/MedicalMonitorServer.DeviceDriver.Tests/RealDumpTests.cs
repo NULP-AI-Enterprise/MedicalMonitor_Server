@@ -20,7 +20,8 @@ public class RealDumpTests
     {
         var text = Encoding.Latin1.GetString(
             File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", name)));
-        return Regex.Split(text, @"^----- [\d:]+ -----\n", RegexOptions.Multiline)
+        // "\r?": a checkout with core.autocrlf turns the fixture's line ends into CRLF.
+        return Regex.Split(text, @"^----- [\d:]+ -----\r?\n", RegexOptions.Multiline)
             .Where(b => b.Contains("MSH|"))
             .ToList();
     }
@@ -155,7 +156,7 @@ public class RealDumpTests
         Assert.Equal("mv", w.ScaleUnit);
         Assert.Equal(1.0, w.Gain);
         Assert.Equal(128, w.Baseline);
-        Assert.Equal(256, w.Levels);
+        Assert.Equal(256, w.SampleRate);
         Assert.Equal(0, w.MinSample);
         Assert.Equal(255, w.MaxSample);
     }
@@ -168,7 +169,7 @@ public class RealDumpTests
         Assert.Equal(1.0, w.Scale);
         Assert.Equal("", w.ScaleUnit);
         Assert.Equal(128, w.Baseline);
-        Assert.Equal(128, w.Levels);
+        Assert.Equal(128, w.SampleRate);
     }
 
     [Fact]

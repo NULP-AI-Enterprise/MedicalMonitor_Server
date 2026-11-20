@@ -99,7 +99,14 @@ public class ParserService : IParserService
         }
 
         if (oru != null)
+        {
             oru.AlarmSettings.AddRange(settings.Values);
+
+            foreach (var zmw in segments.Where(s => s.Name == "ZMW"))
+            {
+                if (ToWaveSamples(zmw) is { } block) oru.WaveSamples.Add(block);
+            }
+        }
 
         msg.Oru = oru;
         msg.Adt = adt;
@@ -261,7 +268,7 @@ public class ParserService : IParserService
 
     /// <summary>
     /// <c>1101^II^0.019531&amp;mv^1.000000&amp;128^256^0&amp;255</c>:
-    /// id ^ label ^ scale&amp;unit ^ gain&amp;baseline ^ levels ^ min&amp;max.
+    /// id ^ label ^ scale&amp;unit ^ gain&amp;baseline ^ samples per second ^ min&amp;max.
     /// </summary>
     private static WaveChannel? ToWaveChannel(UmecObservation o)
     {
@@ -278,7 +285,7 @@ public class ParserService : IParserService
             ScaleUnit = scale.B,
             Gain = ParseNumber(gain.A),
             Baseline = ParseInt(gain.B),
-            Levels = c.Length > 4 ? ParseInt(c[4]) : null,
+            SampleRate = c.Length > 4 ? ParseInt(c[4]) : null,
             MinSample = ParseInt(range.A),
             MaxSample = ParseInt(range.B),
         };
@@ -289,6 +296,63 @@ public class ParserService : IParserService
             var x = parts[i].Split('&');
             return (x[0], x.Length > 1 ? x[1] : "");
         }
+    }
+
+    /// <summary>
+    /// ZMW is Mindray's own waveform segment (ORU msg 157): everything after "ZMW|" is one
+    /// block of samples of one channel, packed so that every wire byte is 0x80 or above and
+    /// can never be taken for an HL7 delimiter or an MLLP framing byte. The packing works
+    /// in groups of eight bytes: seven payload bytes with the top bit forced on, then one
+    /// byte whose bit i is the real top bit of payload byte i. Unpacked, a block is
+    /// <code>
+    /// 0-1  differ in every block (some check value; not verified)
+    /// 2-3  channel id, big endian (1101 = 04 4D)
+    /// 4    1 in every capture
+    /// 5-6  number of samples, big endian
+    /// 7    0
+    /// 8-   the samples, one byte each, then zero padding up to a whole group
+    /// </code>
+    /// Worked out from a live uMec10 (SW 01.10.00): the PDS guide does not describe the
+    /// segment. Returns null for anything that does not fit this layout exactly.
+    /// </summary>
+    private static WaveSamples? ToWaveSamples(Segment zmw)
+    {
+        const int GroupSize = 8;
+        const int PayloadPerGroup = GroupSize - 1;
+        const int HeaderSize = 8;
+
+        var packed = zmw.Body;
+        int groups = packed.Length / GroupSize;
+        if (groups == 0 || packed.Length % GroupSize != 0) return null;
+
+        var data = new byte[groups * PayloadPerGroup];
+        for (int g = 0; g < groups; g++)
+        {
+            int at = g * GroupSize;
+            int topBits = packed[at + PayloadPerGroup];
+            if (topBits is < 0x80 or > 0xFF) return null;
+
+            for (int i = 0; i < PayloadPerGroup; i++)
+            {
+                int wire = packed[at + i];
+                if (wire is < 0x80 or > 0xFF) return null;
+                data[g * PayloadPerGroup + i] = (byte)((wire & 0x7F) | (((topBits >> i) & 1) << 7));
+            }
+        }
+
+        int channelId = (data[2] << 8) | data[3];
+        int count = (data[5] << 8) | data[6];
+
+        // The block must be exactly as long as `count` one-byte samples pack into. Anything
+        // else is a layout nobody has seen (wider samples, say), and guessing at it would
+        // put a made-up trace on a nurse station.
+        if (count == 0 || (HeaderSize + count + PayloadPerGroup - 1) / PayloadPerGroup != groups) return null;
+
+        return new WaveSamples
+        {
+            ChannelId = channelId,
+            Samples = data.AsSpan(HeaderSize, count).ToArray(),
+        };
     }
 
     private static ActiveAlarm ToAlarm(UmecObservation o)
@@ -386,6 +450,7 @@ public class ParserService : IParserService
         }
         if (oru.ParameterLabels.Count > 0 || oru.ParameterGroups.Count > 0) return UmecMessageKind.ParameterLabels;
         if (oru.AlarmSystem != null) return UmecMessageKind.AlarmSystemStatus;
+        if (oru.WaveSamples.Count > 0) return UmecMessageKind.Waveforms;
         if (oru.Observations.Count > 0) return UmecMessageKind.Settings;
         return UmecMessageKind.Unknown;
     }
@@ -434,6 +499,7 @@ public class ParserService : IParserService
         [503] = UmecMessageKind.Vitals,
         [5] = UmecMessageKind.Settings,
         [12] = UmecMessageKind.Settings,
+        [157] = UmecMessageKind.Waveforms,
         [159] = UmecMessageKind.Settings,
         [160] = UmecMessageKind.Settings,
         [161] = UmecMessageKind.Settings,
@@ -505,12 +571,20 @@ public class ParserService : IParserService
     /// </summary>
     private sealed class Segment
     {
+        private readonly string _line;
         private readonly string[] _fields;
 
         public string Name { get; }
 
+        /// <summary>
+        /// Everything after the name and its '|', not split into fields: the form a
+        /// segment with a binary body (ZMW) has to be read in.
+        /// </summary>
+        public string Body => _line.Length > Name.Length ? _line[(Name.Length + 1)..] : "";
+
         public Segment(string line)
         {
+            _line = line;
             _fields = line.Split('|');
             Name = _fields[0];
         }

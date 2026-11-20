@@ -143,7 +143,7 @@ public static class ModelToDtoMappings
         ScaleUnit = model.ScaleUnit,
         Gain = model.Gain,
         Baseline = model.Baseline,
-        Levels = model.Levels,
+        SampleRate = model.SampleRate,
         MinSample = model.MinSample,
         MaxSample = model.MaxSample,
     };
@@ -203,6 +203,7 @@ public static class ModelToDtoMappings
         UmecMessageKind.Settings => UmecMessageKindDto.Settings,
         UmecMessageKind.MonitorStatus => UmecMessageKindDto.MonitorStatus,
         UmecMessageKind.AdtEvent => UmecMessageKindDto.AdtEvent,
+        UmecMessageKind.Waveforms => UmecMessageKindDto.Waveforms,
         _ => UmecMessageKindDto.Unknown,
     };
 }

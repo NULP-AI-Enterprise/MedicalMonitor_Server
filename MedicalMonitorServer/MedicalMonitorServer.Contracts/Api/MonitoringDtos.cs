@@ -99,15 +99,27 @@ public record VitalsDto(
     double? Temperature,
     int? PulseRate);
 
+/// <summary>
+/// A run of consecutive samples of one waveform, scaled for drawing: an ECG is in
+/// millivolts around its zero line, any other waveform is centred on 0 and spans about
+/// -0.5 .. 0.5. A station plays the samples out at <paramref name="SampleRate"/>.
+/// </summary>
+/// <param name="SampleRate">
+/// Samples per second, set by the source: a uMec sends ECG and Pleth at 256 Hz and
+/// respiration at 128 Hz, a second at a time.
+/// </param>
 public record WaveformSampleDto(WaveformType Type, float[] Samples, int SampleRate);
 
 /// <summary>
-/// How to draw one waveform channel of the monitor (HL7 OBX 2153). A sample s maps to the
-/// physical value (s - Baseline) * Scale [ScaleUnit].
+/// One waveform channel as the monitor describes it (HL7 OBX 2153). A raw sample s of the
+/// channel is the physical value (s - Baseline) * Scale [ScaleUnit]. Stations do not need
+/// this to draw, <see cref="WaveformSampleDto"/> samples are already scaled; it tells which
+/// lead a channel carries and what its trace was scaled from.
 /// </summary>
 /// <param name="ChannelId">Monitor channel id: 1101 ECG, 1151 respiration, 1152 Pleth, ...</param>
 /// <param name="Type">Known waveform type, or null for a channel the server does not map.</param>
 /// <param name="Label">Label shown on the monitor, e.g. "II".</param>
+/// <param name="SampleRate">Samples per second of the channel.</param>
 public record WaveformChannelDto(
     int ChannelId,
     WaveformType? Type,
@@ -115,11 +127,14 @@ public record WaveformChannelDto(
     double? Scale,
     string ScaleUnit,
     int? Baseline,
-    int? Levels,
+    int? SampleRate,
     int? MinSample,
     int? MaxSample);
 
-/// <param name="Waveforms">Waveform samples, when the source provides them (REST gateways). The uMec HL7 feed carries none.</param>
+/// <param name="Waveforms">
+/// Waveform samples that came with this frame; empty when there are none. A REST gateway
+/// may send every trace in one frame, a uMec sends each channel in a frame of its own.
+/// </param>
 /// <param name="WaveformChannels">Latest known waveform channel descriptors of the patient's monitor; empty when unknown.</param>
 public record MonitorUpdateDto(
     string PatientId,

@@ -51,8 +51,7 @@ public sealed class ParameterGroup
 /// <summary>
 /// Description of one waveform channel (OBX 2153 "CHN", value type CD), e.g.
 /// <c>1101^II^0.019531&amp;mv^1.000000&amp;128^256^0&amp;255</c> = ECG lead II.
-/// Only the descriptor travels over HL7; the samples themselves are not in
-/// the TCP 4601 stream.
+/// The samples it describes come in their own message, see <see cref="WaveSamples"/>.
 /// </summary>
 public sealed class WaveChannel
 {
@@ -74,10 +73,28 @@ public sealed class WaveChannel
     /// <summary>Sample value that is zero on the trace (128 for ECG / respiration, 0 for Pleth).</summary>
     public int? Baseline { get; set; }
 
-    /// <summary>Number of distinct sample levels (256 = 8 bit).</summary>
-    public int? Levels { get; set; }
+    /// <summary>
+    /// Samples per second: 256 for ECG and Pleth, 128 for respiration on a uMec10.
+    /// The monitor sends exactly this many samples of the channel every second.
+    /// </summary>
+    public int? SampleRate { get; set; }
 
     public int? MinSample { get; set; }
 
     public int? MaxSample { get; set; }
+}
+
+/// <summary>
+/// One block of samples of one waveform channel (ORU msg 157, segment ZMW). The
+/// monitor sends a block per requested channel once a second, and only for the
+/// channels the start query lists. The values are raw: what one of them means —
+/// zero line, scale, range, sample rate — is in the channel's <see cref="WaveChannel"/>.
+/// </summary>
+public sealed class WaveSamples
+{
+    /// <summary>Channel the samples belong to, e.g. 1101 = ECG 1.</summary>
+    public int ChannelId { get; set; }
+
+    /// <summary>The samples in the order they were taken, one unsigned byte each.</summary>
+    public byte[] Samples { get; set; } = Array.Empty<byte>();
 }

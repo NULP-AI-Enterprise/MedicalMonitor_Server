@@ -55,7 +55,7 @@ public sealed class WaveChannelDto
 
     public int? Baseline { get; init; }
 
-    public int? Levels { get; init; }
+    public int? SampleRate { get; init; }
 
     public int? MinSample { get; init; }
 

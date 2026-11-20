@@ -8,8 +8,8 @@ namespace MedicalMonitorServer.Services;
 
 /// <summary>
 /// Bridges decoded uMec HL7 messages from <see cref="DeviceService"/> into the monitoring
-/// pipeline: measured values, device alarms and waveform channels go to the patient bound to
-/// the sending monitor (see <see cref="MonitorRouter"/>).
+/// pipeline: measured values, device alarms, waveform channels and waveform samples go to the
+/// patient bound to the sending monitor (see <see cref="MonitorRouter"/>).
 /// Messages are queued so the device read loops are never blocked by SignalR broadcasting.
 /// </summary>
 public sealed class UmecFeedService : BackgroundService
@@ -26,6 +26,15 @@ public sealed class UmecFeedService : BackgroundService
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
         });
+
+    // Channel descriptors by monitor, then by channel id. Kept per monitor and not read back
+    // from the patient registry: a block of samples has to be scaled by the descriptor of the
+    // monitor it came from, whoever that monitor is feeding and whether or not anybody was
+    // bound to it when the descriptor arrived. Touched by the queue's single reader only.
+    private readonly Dictionary<string, Dictionary<int, WaveChannel>> _waveChannels = new(StringComparer.Ordinal);
+
+    // What was last logged about each monitor channel's trace; blocks arrive every second.
+    private readonly Dictionary<(string MonitorIp, int ChannelId), string> _loggedTraces = new();
 
     public UmecFeedService(
         DeviceService deviceService,
@@ -74,7 +83,8 @@ public sealed class UmecFeedService : BackgroundService
         var info = message.Oru?.Patient ?? message.Adt?.Patient;
         var oru = message.Oru;
 
-        if (_logger.IsEnabled(LogLevel.Debug))
+        // Not for waveform blocks: three a second per monitor, and nothing in them to read.
+        if (_logger.IsEnabled(LogLevel.Debug) && message.Kind != UmecMessageKind.Waveforms)
         {
             // Raw values as the monitor sent them, before sentinels (-100 etc.) become null.
             _logger.LogDebug("uMec msg {MessageId} ({Kind}) from {Ip}: vitals [{Vitals}] alarms [{Alarms}]",
@@ -97,12 +107,19 @@ public sealed class UmecFeedService : BackgroundService
             ? message.SourceIp
             : info?.MonitorIp ?? string.Empty;
 
+        // Before anything can return: the monitor describes its channels once, right after
+        // connecting, which may be before it has a patient.
+        if (oru is { WaveChannels.Count: > 0 })
+        {
+            RememberChannels(monitorIp, oru.WaveChannels);
+        }
+
         var patientId = await _router.ResolveAsync(monitorIp, info, hasReadings, ct);
         if (oru is null || patientId is null) return;
 
         if (oru.WaveChannels.Count > 0)
         {
-            _patients.UpdateWaveformChannels(patientId, oru.WaveChannels.Select(ToChannelDto));
+            _patients.UpdateWaveformChannels(patientId, oru.WaveChannels.Select(UmecWaveforms.ToChannelDto));
         }
 
         // Msg 54 / 56 list every alarm of that category active right now; an empty list means none.
@@ -121,9 +138,74 @@ public sealed class UmecFeedService : BackgroundService
             await _pipeline.IngestDeviceAlarmsAsync(patientId, c, active, ct);
         }
 
-        if (!hasReadings) return;
+        var waveforms = ToWaveforms(monitorIp, oru.WaveSamples);
+        if (!hasReadings)
+        {
+            // The monitor sends samples in a message of their own, without values.
+            if (waveforms is not null)
+            {
+                await _pipeline.IngestWaveformsAsync(patientId, waveforms, DateTimeOffset.UtcNow, ct);
+            }
 
-        await _pipeline.IngestReadingsAsync(patientId, readings, null, DateTimeOffset.UtcNow, ct);
+            return;
+        }
+
+        await _pipeline.IngestReadingsAsync(patientId, readings, waveforms, DateTimeOffset.UtcNow, ct);
+    }
+
+    private void RememberChannels(string monitorIp, IEnumerable<WaveChannel> channels)
+    {
+        if (!_waveChannels.TryGetValue(monitorIp, out var known))
+        {
+            _waveChannels[monitorIp] = known = new Dictionary<int, WaveChannel>();
+        }
+
+        foreach (var channel in channels)
+        {
+            known[channel.ChannelId] = channel;
+        }
+    }
+
+    /// <summary>
+    /// Scales the blocks of samples of one message by the descriptors their monitor sent.
+    /// Null when the message has none a station can draw.
+    /// </summary>
+    private WaveformSampleDto[]? ToWaveforms(string monitorIp, IReadOnlyList<WaveSamples> blocks)
+    {
+        if (blocks.Count == 0) return null;
+
+        _waveChannels.TryGetValue(monitorIp, out var known);
+
+        List<WaveformSampleDto>? waveforms = null;
+        foreach (var block in blocks)
+        {
+            WaveChannel? channel = null;
+            known?.TryGetValue(block.ChannelId, out channel);
+
+            var waveform = channel is null ? null : UmecWaveforms.ToSampleDto(channel, block);
+            if (waveform is not null) (waveforms ??= new()).Add(waveform);
+
+            LogTrace(monitorIp, block.ChannelId, channel, waveform);
+        }
+
+        return waveforms?.ToArray();
+    }
+
+    /// <summary>One line when a monitor channel starts to be drawn, stops, or changes lead or rate.</summary>
+    private void LogTrace(string monitorIp, int channelId, WaveChannel? channel, WaveformSampleDto? waveform)
+    {
+        var state = waveform is not null ? $"sent to stations as {waveform.Type} at {waveform.SampleRate} Hz"
+            : channel is null ? "not drawn: the monitor has not described this channel"
+            : UmecWaveforms.TypeOf(channel) is null ? "not drawn: stations have no trace for it"
+            : "not drawn: its descriptor gives no usable scale";
+
+        var key = (monitorIp, channelId);
+        if (_loggedTraces.TryGetValue(key, out var logged) && logged == state) return;
+
+        _loggedTraces[key] = state;
+        _logger.LogInformation(
+            "Waveform channel {ChannelId} ({Label}) of monitor {MonitorIp} is {State}.",
+            channelId, channel?.Label ?? "?", monitorIp, state);
     }
 
     private static AlertDto ToAlertDto(string patientId, ActiveAlarm alarm, AlertCategory category)
@@ -149,28 +231,6 @@ public sealed class UmecFeedService : BackgroundService
             Level: level,
             Category: category);
     }
-
-    private static WaveformChannelDto ToChannelDto(WaveChannel c) => new(
-        c.ChannelId,
-        c.ChannelId switch
-        {
-            1151 => WaveformType.Respiration,
-            1152 => WaveformType.Pleth,
-            >= 1100 and < 1150 => c.Label switch
-            {
-                "II" => WaveformType.ECG_II,
-                "I" => WaveformType.ECG_I,
-                _ => null,
-            },
-            _ => null,
-        },
-        c.Label,
-        c.Scale,
-        c.ScaleUnit,
-        c.Baseline,
-        c.Levels,
-        c.MinSample,
-        c.MaxSample);
 
     /// <summary>Maps Mindray parameter ids to the vitals the UI shows.</summary>
     private static VitalReadings ToReadings(IEnumerable<VitalSign> vitals)

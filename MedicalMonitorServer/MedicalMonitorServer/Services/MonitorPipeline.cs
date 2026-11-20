@@ -42,6 +42,13 @@ public interface IMonitorPipeline
     Task IngestReadingsAsync(string patientId, VitalReadings readings, WaveformSampleDto[]? waveforms, DateTimeOffset timestamp, CancellationToken ct = default);
 
     /// <summary>
+    /// Passes on waveform samples that came without any values: broadcasts ReceiveVitals with
+    /// them and the vitals the patient already has. Changes no state, so samples alone neither
+    /// touch the alerts nor make the feed count as fresh.
+    /// </summary>
+    Task IngestWaveformsAsync(string patientId, WaveformSampleDto[] waveforms, DateTimeOffset timestamp, CancellationToken ct = default);
+
+    /// <summary>
     /// Applies the full list of device alarms of one category active on the patient's monitor:
     /// broadcasts AlertTriggered for new / re-prioritised ones and AlertCleared for those gone.
     /// </summary>
@@ -168,6 +175,31 @@ public sealed class MonitorPipeline : IMonitorPipeline
         await _hub.Clients.All.SendAsync(HubMethods.ReceiveVitals, update, ct);
 
         await BroadcastAsync(_alerts.Reconcile(patientId, merged), ct);
+    }
+
+    public async Task IngestWaveformsAsync(
+        string patientId,
+        WaveformSampleDto[] waveforms,
+        DateTimeOffset timestamp,
+        CancellationToken ct = default)
+    {
+        var patient = _patients.Get(patientId);
+        if (patient is null)
+        {
+            _logger.LogDebug("Waveforms for unknown patient {PatientId} ignored.", patientId);
+            return;
+        }
+
+        var update = new MonitorUpdateDto(
+            patient.PatientId,
+            patient.PatientName,
+            patient.BedNumber,
+            (_patients.GetReadings(patientId) ?? new VitalReadings()).ToDto(),
+            waveforms,
+            timestamp,
+            _patients.GetWaveformChannels(patientId));
+
+        await _hub.Clients.All.SendAsync(HubMethods.ReceiveVitals, update, ct);
     }
 
     public async Task IngestDeviceAlarmsAsync(
