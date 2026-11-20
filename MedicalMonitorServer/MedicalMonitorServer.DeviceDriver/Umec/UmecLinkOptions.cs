@@ -26,4 +26,20 @@ public sealed record UmecLinkOptions
 
     /// <summary>Consecutive sessions without a single message after which a connection gives up.</summary>
     public int MaxFailedSessions { get; init; } = 5;
+
+    /// <summary>
+    /// A live stream that has not delivered a byte for this long is treated as
+    /// broken. The monitor echoes once a second, so this is ten missed echoes.
+    /// Since the watchdog no longer probes a port this driver owns, this is the
+    /// only thing that notices a monitor that went silent without hanging up.
+    /// </summary>
+    public TimeSpan ReadTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// How long to wait for the TCP handshake. A monitor that was switched off
+    /// or unplugged answers nothing at all, and the OS would retry SYN for over
+    /// two minutes before giving up, which would keep this link — and the
+    /// watchdog's view of it — stuck for minutes per attempt.
+    /// </summary>
+    public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(5);
 }

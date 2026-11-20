@@ -7,6 +7,7 @@ using MedicalMonitorServer;
 using MedicalMonitorServer.Contracts.Api;
 using MedicalMonitorServer.Core.Monitoring;
 using MedicalMonitorServer.DeviceDriver;
+using MedicalMonitorServer.DeviceDriver.Umec;
 using MedicalMonitorServer.Hubs;
 using MedicalMonitorServer.Security;
 using MedicalMonitorServer.Services;
@@ -54,6 +55,18 @@ builder.Services.AddSingleton(serviceProvider =>
     return options;
 });
 builder.Services.AddSingleton<IWatchDogService, WatchDogService>();
+
+// Link timings of the uMec driver. TimeSpan values bind from "hh:mm:ss" strings,
+// so the section uses that form; a bare number would throw at startup.
+builder.Services.AddSingleton(serviceProvider =>
+{
+    var options = new UmecLinkOptions();
+    serviceProvider
+        .GetRequiredService<IConfiguration>()
+        .GetSection("Umec")
+        .Bind(options);
+    return options;
+});
 builder.Services.AddSingleton<DeviceService>();
 builder.Services.AddHostedService<WatchDogHostedService>();
 builder.Services.AddFastEndpoints();

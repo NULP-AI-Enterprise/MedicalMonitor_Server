@@ -31,7 +31,11 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
     {
         _logger = logger ?? NullLogger<UmecDeviceDataProvider>.Instance;
         _options = options ?? new UmecLinkOptions();
-        _readerFactory = readerFactory ?? (log => new ComunicationService(log));
+        _readerFactory = readerFactory ?? (log => new ComunicationService(log)
+        {
+            ReadTimeout = _options.ReadTimeout,
+            ConnectTimeout = _options.ConnectTimeout,
+        });
         _parserService = parserService ?? new ParserService();
     }
 
@@ -106,6 +110,12 @@ public sealed class UmecDeviceDataProvider : IDeviceDataProvider
     private void OnConnectionClosed(MonitorConnection connection, bool cancelled)
     {
         var state = connection.State;
+
+        // Order matters: releasing the link (so the watchdog resumes probing this
+        // address) must come BEFORE the flip to Disconnected below. Reversed, the
+        // flip would land while probing is still suppressed, and the first probe
+        // after release would compare Disconnected to Disconnected, report no
+        // change, and the monitor would never be handed over again.
         _connections.TryRemove(new KeyValuePair<string, MonitorConnection>(state.IpAddress, connection));
 
         if (cancelled)
