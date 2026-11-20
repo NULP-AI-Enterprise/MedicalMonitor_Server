@@ -12,7 +12,8 @@ namespace MedicalMonitorServer.Hubs;
 /// Clients call GetPatients / GetActiveAlerts on connect, then follow the pushed
 /// ReceiveVitals / Patient* / Alert* messages. Reading is open; AcknowledgeAlert needs the
 /// operator key, sent as the X-Api-Key header or the access_token query parameter
-/// (browsers cannot set headers on WebSocket connections).
+/// (browsers cannot set headers on WebSocket connections). Connections from this machine
+/// need no key while Security:TrustLocalStations is on (the station web UI, see StationUi:Path).
 /// </summary>
 public class VitalsHub : Hub
 {
@@ -67,7 +68,8 @@ public class VitalsHub : Hub
         var http = Context.GetHttpContext();
         var key = http?.Request.Headers[ApiKeyOptions.HeaderName].ToString();
         if (string.IsNullOrEmpty(key)) key = http?.Request.Query["access_token"].ToString();
-        Context.Items[OperatorItem] = ApiKeyOptions.Matches(key, _keys.OperatorKey);
+        Context.Items[OperatorItem] = ApiKeyOptions.Matches(key, _keys.OperatorKey)
+            || _keys.IsTrustedLocal(http);
 
         _connections.Increment();
         _logger.LogInformation("Station connected: {ConnectionId}", Context.ConnectionId);

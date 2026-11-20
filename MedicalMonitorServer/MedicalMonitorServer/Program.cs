@@ -121,8 +121,35 @@ var app = builder.Build();
 
 // No HTTPS redirection: the station runs over plain HTTP on the ward LAN, and a redirect
 // would break the WebSocket upgrade for clients on the http endpoint.
-app.UseDefaultFiles();
-app.UseStaticFiles();
+
+// The nurse-station web UI lives in the MedicalMonitor_Desktop repo
+// (src/Monitoring.WebService/wwwroot) and is served from there, so the two repos never
+// hold diverging copies. StationUi:Path points at that folder; relative paths are under
+// the content root. The default assumes both repos are cloned side by side.
+var stationUiPath = builder.Configuration["StationUi:Path"];
+if (!string.IsNullOrWhiteSpace(stationUiPath))
+{
+    var root = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, stationUiPath));
+    if (Directory.Exists(root))
+    {
+        var files = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(root);
+        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            FileProvider = files,
+            // Revalidate on every load (cheap: 304 by ETag). Without it a browser may keep a
+            // stale index.html next to a new app.js after the UI is updated, and break.
+            OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache",
+        });
+        app.Logger.LogInformation("Serving the station UI from {Path}", root);
+    }
+    else
+    {
+        app.Logger.LogWarning(
+            "Station UI folder {Path} not found; the API runs without the web UI. " +
+            "Clone MedicalMonitor_Desktop next to this repo or set StationUi:Path (env StationUi__Path).", root);
+    }
+}
 
 app.UseCors("AllowStations");
 
