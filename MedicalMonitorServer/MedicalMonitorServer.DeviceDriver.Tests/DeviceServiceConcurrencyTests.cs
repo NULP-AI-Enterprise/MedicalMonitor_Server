@@ -36,13 +36,20 @@ public class DeviceServiceConcurrencyTests
 
         public int Disconnects;
 
+        /// <summary>Runs inside <see cref="Disconnect"/>, to stand in for what closing a real link does.</summary>
+        public Action<DeviceState>? WhileDisconnecting;
+
         public IReadOnlyCollection<DeviceState> ConnectedDevices => Array.Empty<DeviceState>();
 
         public IReadOnlyCollection<PatientInfo> Patients => Array.Empty<PatientInfo>();
 
         public void Connect(DeviceState deviceState) { }
 
-        public void Disconnect(DeviceState deviceState) => Interlocked.Increment(ref Disconnects);
+        public void Disconnect(DeviceState deviceState)
+        {
+            Interlocked.Increment(ref Disconnects);
+            WhileDisconnecting?.Invoke(deviceState);
+        }
 
         public void LinkUp(DeviceState state) => OnDeviceConnected?.Invoke(this, state);
 
@@ -171,6 +178,56 @@ public class DeviceServiceConcurrencyTests
 
         Assert.Equal(2, snapshot.Count);
         Assert.Single(service.GetAllDevice());
+    }
+
+    [Fact]
+    public async Task Closing_a_link_does_not_hold_the_device_list()
+    {
+        // Disconnect cancels a link's run loop and can take a while. Were it called
+        // with the list locked, /devices and /health would stall behind it, and so
+        // would every other link reporting its own state.
+        var watchDog = new FakeWatchDog();
+        var provider = new FakeProvider();
+        var service = new DeviceService(watchDog, loggerFactory: null, providers: new[] { provider });
+        using var release = new ManualResetEventSlim();
+        using var entered = new ManualResetEventSlim();
+        provider.WhileDisconnecting = _ =>
+        {
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(10));
+        };
+
+        provider.LinkUp(Device("10.0.0.1"));
+        var closing = Task.Factory.StartNew(
+            () => watchDog.OnDeviceStateChanged!.Invoke(Device("10.0.0.1", DeviceStateEnum.Disconnected)),
+            TaskCreationOptions.LongRunning);
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)), "Disconnect was never reached");
+
+        // While that Disconnect is still in progress:
+        var reading = Task.Run(() => service.GetAllDevice());
+        var linking = Task.Run(() => provider.LinkUp(Device("10.0.0.2")));
+        await Task.WhenAll(reading, linking).WaitAsync(TimeSpan.FromSeconds(2));
+
+        release.Set();
+        await closing.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("10.0.0.2", Assert.Single(service.GetAllDevice()).IpAddress);
+    }
+
+    [Fact]
+    public void Closing_a_link_may_report_its_own_end_before_it_returns()
+    {
+        // Cancelling a run loop can execute its continuation inline, so the link's
+        // "stream ended" report arrives on the very thread that is disconnecting it.
+        var watchDog = new FakeWatchDog();
+        var provider = new FakeProvider();
+        var service = new DeviceService(watchDog, loggerFactory: null, providers: new[] { provider });
+        provider.WhileDisconnecting = state => provider.LinkDown(state);
+
+        provider.LinkUp(Device("10.0.0.1"));
+        watchDog.OnDeviceStateChanged!.Invoke(Device("10.0.0.1", DeviceStateEnum.Disconnected));
+
+        Assert.Equal(1, provider.Disconnects);
+        Assert.Empty(service.GetAllDevice());
     }
 
     [Fact]

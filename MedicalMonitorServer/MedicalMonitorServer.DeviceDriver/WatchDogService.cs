@@ -75,9 +75,9 @@ public class WatchDogService : IWatchDogService
             var tasks = toProbe.Select(ip => CheckDeviceAsync(ip, cancellationToken));
             var results = await Task.WhenAll(tasks);
 
-            // Transitions are logged after the loop: the factories below run under
-            // the dictionary's bucket lock, which already carries OnDeviceStateChanged
-            // (see item 9) and must not be given more work.
+            // Transitions are collected by value and logged after the loop, once the
+            // state callbacks have run. (AddOrUpdate calls its factories outside the
+            // dictionary's locks, so the callbacks below do not hold one.)
             var transitions = new List<Transition>();
 
             foreach (var currentState in results)
