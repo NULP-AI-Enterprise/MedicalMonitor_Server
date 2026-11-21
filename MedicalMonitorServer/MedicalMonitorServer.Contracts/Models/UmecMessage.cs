@@ -103,6 +103,15 @@ public sealed class UmecVitalsMessage
 
     public List<VitalSign> Vitals { get; set; } = new();
 
+    /// <summary>
+    /// True when <see cref="Vitals"/> is everything the monitor measures right now, so a
+    /// running value that is not in it (or is in it without a value) is one the monitor no
+    /// longer has - a sensor came off - and must not stay on a station. False for monitors
+    /// that send their values piecemeal (a uMec), where a missing one only means "not in this
+    /// message".
+    /// </summary>
+    public bool VitalsAreComplete { get; set; }
+
     public List<AlarmSetting> AlarmSettings { get; set; } = new();
 
     public List<ActiveAlarm> Alarms { get; set; } = new();

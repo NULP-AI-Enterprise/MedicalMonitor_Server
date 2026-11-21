@@ -186,7 +186,8 @@ public sealed class UmecFeedService : BackgroundService
                 .Concat(oru.ScaledWaves.Select(w => new WaveformSampleDto(w.Type, w.Samples, w.SampleRate)))
                 .ToArray();
         }
-        if (!hasReadings)
+        // A complete report with no value in it is news too: every sensor is off.
+        if (!hasReadings && !oru.VitalsAreComplete)
         {
             // The monitor sends samples in a message of their own, without values.
             if (waveforms is not null)
@@ -197,7 +198,7 @@ public sealed class UmecFeedService : BackgroundService
             return;
         }
 
-        await _pipeline.IngestReadingsAsync(patientId, readings, waveforms, DateTimeOffset.UtcNow, ct);
+        await _pipeline.IngestReadingsAsync(patientId, readings, waveforms, DateTimeOffset.UtcNow, ct, oru.VitalsAreComplete);
     }
 
     private void RememberChannels(string monitorIp, IEnumerable<WaveChannel> channels)

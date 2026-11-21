@@ -296,6 +296,10 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         {
             AddVitals(oru, numerics);
 
+            // The block is the monitor's whole list: a sensor that came off is either gone from
+            // it or there without a value, and the station must stop showing its last number.
+            oru.VitalsAreComplete = true;
+
             // With the values, so the roster learns who is on the monitor as often as it learns the values.
             oru.Patient = new PatientInfo
             {

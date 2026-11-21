@@ -22,6 +22,12 @@ public interface IPatientRegistry
     /// <summary>Merges new readings into the patient's snapshot and returns the merged result.</summary>
     VitalReadings MergeReadings(string patientId, VitalReadings update);
 
+    /// <summary>
+    /// Makes <paramref name="snapshot"/> the patient's running values, dropping those it lacks
+    /// (see <see cref="VitalReadings.ReplaceRunning"/>). Returns the resulting snapshot.
+    /// </summary>
+    VitalReadings ReplaceReadings(string patientId, VitalReadings snapshot);
+
     /// <summary>Forgets the patient's snapshot, e.g. when they move to another monitor.</summary>
     void ResetReadings(string patientId);
 
@@ -80,6 +86,9 @@ public sealed class PatientRegistry : IPatientRegistry
 
     public VitalReadings MergeReadings(string patientId, VitalReadings update) =>
         _readings.AddOrUpdate(patientId, _ => update, (_, existing) => existing.Merge(update));
+
+    public VitalReadings ReplaceReadings(string patientId, VitalReadings snapshot) =>
+        _readings.AddOrUpdate(patientId, _ => snapshot, (_, existing) => existing.ReplaceRunning(snapshot));
 
     public WaveformChannelDto[] GetWaveformChannels(string patientId) =>
         _channels.TryGetValue(patientId, out var channels) ? channels : Array.Empty<WaveformChannelDto>();

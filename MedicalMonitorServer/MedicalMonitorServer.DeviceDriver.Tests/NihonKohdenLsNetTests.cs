@@ -256,6 +256,7 @@ public class NihonKohdenLsNetTests
 
         Assert.Equal(UmecMessageKind.Vitals, message.Kind);
         Assert.Equal("10.10.46.48", message.SourceIp);
+        Assert.True(message.Oru!.VitalsAreComplete);      // the block is the monitor's whole list
 
         var vitals = message.Oru!.Vitals.ToDictionary(v => v.ParameterId, v => v.Value);
         Assert.Equal(80, vitals[101]);              // HR
@@ -287,6 +288,7 @@ public class NihonKohdenLsNetTests
 
         Assert.Equal(UmecMessageKind.Waveforms, message.Kind);
         Assert.Empty(message.Oru!.Vitals);
+        Assert.False(message.Oru.VitalsAreComplete);       // samples alone say nothing about the values
         Assert.Null(message.Oru.Patient);
 
         // ECG II and pleth; the arterial pressure trace has no lane on a station.

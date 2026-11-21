@@ -114,6 +114,7 @@ public class NihonKohdenTests
 
         Assert.Equal(2, messages.Count);
         Assert.Empty(messages[0].Oru!.Vitals);
+        Assert.True(messages[0].Oru!.VitalsAreComplete);   // "nothing" is the report, not a gap in it
         Assert.Equal(UmecMessageKind.Vitals, messages[0].Kind);
         Assert.Equal(new[] { 170, 171, 172 }, messages[1].Oru!.Vitals.Select(v => v.ParameterId));
     }

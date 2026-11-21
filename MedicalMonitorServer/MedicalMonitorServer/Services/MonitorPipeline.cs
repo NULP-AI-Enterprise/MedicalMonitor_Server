@@ -39,7 +39,11 @@ public interface IMonitorPipeline
     Task IngestTelemetryAsync(MonitorUpdateDto update, CancellationToken ct = default);
 
     /// <summary>Applies partial readings (only the values the device reported) for a known patient.</summary>
-    Task IngestReadingsAsync(string patientId, VitalReadings readings, WaveformSampleDto[]? waveforms, DateTimeOffset timestamp, CancellationToken ct = default);
+    /// <param name="complete">
+    /// The readings are everything the monitor measures right now: a running value they lack is
+    /// taken off the patient instead of being kept from an earlier report.
+    /// </param>
+    Task IngestReadingsAsync(string patientId, VitalReadings readings, WaveformSampleDto[]? waveforms, DateTimeOffset timestamp, CancellationToken ct = default, bool complete = false);
 
     /// <summary>
     /// Passes on waveform samples that came without any values: broadcasts ReceiveVitals with
@@ -165,7 +169,8 @@ public sealed class MonitorPipeline : IMonitorPipeline
         VitalReadings readings,
         WaveformSampleDto[]? waveforms,
         DateTimeOffset timestamp,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        bool complete = false)
     {
         var patient = _patients.Get(patientId);
         if (patient is null)
@@ -175,7 +180,9 @@ public sealed class MonitorPipeline : IMonitorPipeline
         }
 
         _feed.MarkReceived();
-        var merged = _patients.MergeReadings(patientId, readings);
+        var merged = complete
+            ? _patients.ReplaceReadings(patientId, readings)
+            : _patients.MergeReadings(patientId, readings);
 
         var update = new MonitorUpdateDto(
             patient.PatientId,

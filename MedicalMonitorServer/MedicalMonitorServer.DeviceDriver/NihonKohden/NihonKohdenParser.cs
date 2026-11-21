@@ -66,6 +66,10 @@ public sealed class NihonKohdenParser : IParserService
             });
         }
 
+        // The minute's report lists every value the monitor has; with no sensor attached it
+        // has no OBX at all.
+        oru.VitalsAreComplete = true;
+
         oru.Patient = ToPatient(oru.Patient, message);
 
         // Every message of this stream is the minute's report, even when no sensor is attached

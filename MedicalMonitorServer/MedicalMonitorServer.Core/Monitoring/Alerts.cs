@@ -76,6 +76,22 @@ public sealed record VitalReadings(
         update.Temperature ?? Temperature,
         update.PulseRate ?? PulseRate);
 
+    /// <summary>
+    /// Takes <paramref name="snapshot"/> as everything the monitor measures right now: a running
+    /// value it does not carry is dropped, not kept from before. Blood pressure is the exception -
+    /// a cuff reading is taken now and then and stands until the next one, so it is only ever
+    /// replaced by a new reading.
+    /// </summary>
+    public VitalReadings ReplaceRunning(VitalReadings snapshot) => new(
+        snapshot.HeartRate,
+        snapshot.SpO2,
+        snapshot.Systolic ?? Systolic,
+        snapshot.Diastolic ?? Diastolic,
+        snapshot.MeanArterialPressure ?? MeanArterialPressure,
+        snapshot.RespiratoryRate,
+        snapshot.Temperature,
+        snapshot.PulseRate);
+
     /// <summary>Wire form: missing values stay null. Nibp is always an object, its fields may be null.</summary>
     public VitalsDto ToDto()
     {
