@@ -120,8 +120,13 @@ public sealed class IngestTelemetryEndpoint : Endpoint<MonitorUpdateDto>
 public sealed class IngestAlertEndpoint : Endpoint<AlertDto>
 {
     private readonly IMonitorPipeline _pipeline;
+    private readonly IPatientRegistry _patients;
 
-    public IngestAlertEndpoint(IMonitorPipeline pipeline) => _pipeline = pipeline;
+    public IngestAlertEndpoint(IMonitorPipeline pipeline, IPatientRegistry patients)
+    {
+        _pipeline = pipeline;
+        _patients = patients;
+    }
 
     public override void Configure()
     {
@@ -143,6 +148,15 @@ public sealed class IngestAlertEndpoint : Endpoint<AlertDto>
         {
             AddError("code or vitalSign is required.");
             await Send.ErrorsAsync(cancellation: ct);
+            return;
+        }
+
+        // Unlike telemetry, an alert carries no name or bed to admit a patient with, so one
+        // for a patient the server does not know has nowhere to be shown and is turned away.
+        if (_patients.Get(req.PatientId) is null)
+        {
+            AddError(r => r.PatientId, "No patient with this id is on the roster.");
+            await Send.ErrorsAsync(StatusCodes.Status404NotFound, ct);
             return;
         }
 

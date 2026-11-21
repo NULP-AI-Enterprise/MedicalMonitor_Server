@@ -62,10 +62,19 @@ public class ComunicationService : IComunicationService
 
     /// <summary>
     /// A connection that has not delivered a single byte for this long is
-    /// treated as broken. The monitor echoes once a second, so silence this
-    /// long means the link is dead even when TCP has not noticed yet.
+    /// treated as broken. The monitor echoes once a second, so this is ten
+    /// missed echoes. Since the watchdog no longer probes a port this reader
+    /// owns, this is the only thing that notices a monitor which went silent
+    /// without hanging up; see <c>IWatchDogService.IsLinkOwned</c>.
     /// </summary>
-    public TimeSpan ReadTimeout { get; init; } = TimeSpan.FromSeconds(30);
+    public TimeSpan ReadTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// How long to wait for the TCP handshake. A monitor that is switched off
+    /// answers nothing at all and the OS would retry SYN for over two minutes,
+    /// so without a deadline here one dead address stalls the link for minutes.
+    /// </summary>
+    public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(5);
 
     private readonly MemoryStream _buffer = new();
 
@@ -150,10 +159,24 @@ public class ComunicationService : IComunicationService
     {
         Reset();
         using var client = new TcpClient();
-        await client.ConnectAsync(ip, port, cancellationToken);
+        using (var connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            connectCts.CancelAfter(ConnectTimeout);
+            try
+            {
+                await client.ConnectAsync(ip, port, connectCts.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"Monitor {ip}:{port} did not accept a connection within {ConnectTimeout.TotalSeconds:0}s.");
+            }
+        }
 
-        // Send the echo without waiting for more data to batch, and let TCP
-        // keep-alive notice a cable pull the monitor never told us about.
+        // Send the echo without waiting for more data to batch. Keep-alive is
+        // enabled too, but with the kernel's default idle time (7200s on Linux)
+        // it will not notice a cable pull in any useful time — ReadTimeout is
+        // what actually detects that.
         client.NoDelay = true;
         client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
         _logger.LogInformation("Connected to monitor {Ip}:{Port}.", ip, port);

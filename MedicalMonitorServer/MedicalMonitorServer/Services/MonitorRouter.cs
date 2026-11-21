@@ -34,14 +34,15 @@ public sealed class MonitorRouter
     // Last drop reason logged per monitor; a monitor sends several messages a second.
     private readonly Dictionary<string, string> _loggedDrops = new(StringComparer.Ordinal);
 
-    private readonly IMonitorAdmissions _admissions;
+    private readonly IMonitorAdmissions? _admissions;
 
+    /// <param name="admissions">Writes the patient to monitors that take it; without one no monitor is told anything.</param>
     public MonitorRouter(
         IMonitorBindings bindings,
         IMonitorPipeline pipeline,
         IPatientRegistry patients,
-        IMonitorAdmissions admissions,
-        ILogger<MonitorRouter> logger)
+        ILogger<MonitorRouter> logger,
+        IMonitorAdmissions? admissions = null)
     {
         _bindings = bindings;
         _pipeline = pipeline;
@@ -57,6 +58,8 @@ public sealed class MonitorRouter
     /// </summary>
     private async Task WriteToMonitorAsync(string monitorIp, PatientInfoDto patient, bool nameOnly, CancellationToken ct)
     {
+        if (_admissions is null) return;
+
         MonitorAdmissionResult result;
         try
         {
@@ -143,6 +146,42 @@ public sealed class MonitorRouter
             }
 
             return result.PatientId;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Flags the patients whose monitor has sent nothing for longer than
+    /// <paramref name="silentAfter"/>, and unflags those whose monitor is talking again.
+    /// </summary>
+    /// <remarks>
+    /// Runs under the same gate as <see cref="ResolveAsync"/>, which is what stamps a
+    /// monitor's last-seen time. So a message either was resolved before this looked — and
+    /// its monitor is not silent — or is resolved after, and its values are ingested after
+    /// the snapshot was dropped. A live bed can never be blanked by a message arriving at
+    /// the same instant.
+    /// "Sent nothing" means no message at all, the monitor's once-a-second echo included: a
+    /// monitor that still echoes but reports no vitals is not silent, its values are simply
+    /// absent. Patients fed only over REST have no monitor binding and are not covered.
+    /// </remarks>
+    public async Task SweepSilentAsync(DateTimeOffset now, TimeSpan silentAfter, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var silent = new Dictionary<string, MonitorBindingDto>(StringComparer.Ordinal);
+            foreach (var monitor in _bindings.GetAll())
+            {
+                if (monitor.PatientId is { } patientId && now - monitor.LastSeen > silentAfter)
+                {
+                    silent.TryAdd(patientId, monitor);
+                }
+            }
+
+            await _pipeline.ReconcileMonitorSilenceAsync(silent, now, ct);
         }
         finally
         {

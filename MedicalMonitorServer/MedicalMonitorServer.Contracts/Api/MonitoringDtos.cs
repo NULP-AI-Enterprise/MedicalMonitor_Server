@@ -173,6 +173,18 @@ public record AlertDto(
 
     public static string BuildDeviceId(string patientId, int code) => $"{patientId}:device:{code}";
 
+    /// <summary>
+    /// <see cref="Code"/> of the alert the server raises when a patient's monitor has stopped
+    /// sending anything. Negative, so it cannot be one of the monitor's own alarm ids.
+    /// </summary>
+    public const int MonitorSilentCode = -1;
+
+    /// <summary>
+    /// Key of the "monitor is silent" alert. Deliberately outside the "{patientId}:device:{code}"
+    /// namespace, which a gateway can write to with any code it likes.
+    /// </summary>
+    public static string BuildMonitorSilentId(string patientId) => $"{patientId}:monitor-silent";
+
     /// <summary>Severity the UI uses for a device priority: high is critical, everything else a warning.</summary>
     public static AlertSeverity SeverityOf(DeviceAlarmLevel? level) =>
         level == DeviceAlarmLevel.High ? AlertSeverity.Critical : AlertSeverity.Warning;
