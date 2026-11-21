@@ -125,11 +125,13 @@ public sealed class UpdatePatientEndpoint : Endpoint<UpdatePatientRequest, Patie
 {
     private readonly IPatientRegistry _patients;
     private readonly IMonitorPipeline _pipeline;
+    private readonly MonitorRouter _router;
 
-    public UpdatePatientEndpoint(IPatientRegistry patients, IMonitorPipeline pipeline)
+    public UpdatePatientEndpoint(IPatientRegistry patients, IMonitorPipeline pipeline, MonitorRouter router)
     {
         _patients = patients;
         _pipeline = pipeline;
+        _router = router;
     }
 
     public override void Configure()
@@ -157,6 +159,7 @@ public sealed class UpdatePatientEndpoint : Endpoint<UpdatePatientRequest, Patie
 
         var updated = new PatientInfoDto(req.PatientId, req.PatientName, req.BedNumber, req.Diagnosis, req.PatientType);
         await _pipeline.UpsertPatientAsync(updated, ct);
+        await _router.PatientEditedAsync(updated, ct);
         await Send.OkAsync(updated, ct);
     }
 }

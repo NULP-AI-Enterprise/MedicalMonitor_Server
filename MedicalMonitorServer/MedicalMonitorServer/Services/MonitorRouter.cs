@@ -1,6 +1,7 @@
 using MedicalMonitorServer.Contracts.Api;
 using MedicalMonitorServer.Contracts.Models;
 using MedicalMonitorServer.Core.Monitoring;
+using MedicalMonitorServer.DeviceDriver;
 
 namespace MedicalMonitorServer.Services;
 
@@ -33,17 +34,69 @@ public sealed class MonitorRouter
     // Last drop reason logged per monitor; a monitor sends several messages a second.
     private readonly Dictionary<string, string> _loggedDrops = new(StringComparer.Ordinal);
 
+    private readonly IMonitorAdmissions? _admissions;
+
+    /// <param name="admissions">Writes the patient to monitors that take it; without one no monitor is told anything.</param>
     public MonitorRouter(
         IMonitorBindings bindings,
         IMonitorPipeline pipeline,
         IPatientRegistry patients,
-        ILogger<MonitorRouter> logger)
+        ILogger<MonitorRouter> logger,
+        IMonitorAdmissions? admissions = null)
     {
         _bindings = bindings;
         _pipeline = pipeline;
         _patients = patients;
+        _admissions = admissions;
         _logger = logger;
     }
+
+    /// <summary>
+    /// Tells the monitor itself who its patient is, where the monitor can be told (see
+    /// <see cref="IMonitorAdmissions"/>). The binding made on the server does not depend on it:
+    /// a monitor that refuses or is off keeps feeding the patient it was given by hand.
+    /// </summary>
+    private async Task WriteToMonitorAsync(string monitorIp, PatientInfoDto patient, bool nameOnly, CancellationToken ct)
+    {
+        if (_admissions is null) return;
+
+        MonitorAdmissionResult result;
+        try
+        {
+            result = nameOnly
+                ? await _admissions.UpdatePatientAsync(monitorIp, patient.PatientId, patient.PatientName, ct)
+                : await _admissions.AssignPatientAsync(monitorIp, patient.PatientId, patient.PatientName, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Writing patient {PatientId} to monitor {MonitorIp} failed.", patient.PatientId, monitorIp);
+            return;
+        }
+
+        switch (result.Status)
+        {
+            case MonitorAdmissionStatus.NotSupported:
+                return;
+
+            case MonitorAdmissionStatus.Accepted:
+                _logger.LogInformation("Monitor {MonitorIp} now carries patient {PatientId} ({Detail}).",
+                    monitorIp, patient.PatientId, result.Detail);
+                return;
+
+            default:
+                _logger.LogWarning(
+                    "Patient {PatientId} was not written to monitor {MonitorIp}: {Status} ({Detail}). " +
+                    "The monitor keeps reporting what it had; enter the patient on the monitor by hand.",
+                    patient.PatientId, monitorIp, result.Status, result.Detail);
+                return;
+        }
+    }
+
+    /// <summary>After a patient's roster entry was edited: passes the new name to the monitor they are on.</summary>
+    public Task PatientEditedAsync(PatientInfoDto patient, CancellationToken ct) =>
+        _bindings.FindMonitorOf(patient.PatientId) is { } monitorIp
+            ? WriteToMonitorAsync(monitorIp, patient, nameOnly: true, ct)
+            : Task.CompletedTask;
 
     /// <summary>
     /// Returns the id of the patient a message from <paramref name="monitorIp"/> belongs to,
@@ -100,8 +153,58 @@ public sealed class MonitorRouter
         }
     }
 
-    /// <summary>Moves a patient to another monitor by hand.</summary>
+    /// <summary>
+    /// Flags the patients whose monitor has sent nothing for longer than
+    /// <paramref name="silentAfter"/>, and unflags those whose monitor is talking again.
+    /// </summary>
+    /// <remarks>
+    /// Runs under the same gate as <see cref="ResolveAsync"/>, which is what stamps a
+    /// monitor's last-seen time. So a message either was resolved before this looked — and
+    /// its monitor is not silent — or is resolved after, and its values are ingested after
+    /// the snapshot was dropped. A live bed can never be blanked by a message arriving at
+    /// the same instant.
+    /// "Sent nothing" means no message at all, the monitor's once-a-second echo included: a
+    /// monitor that still echoes but reports no vitals is not silent, its values are simply
+    /// absent. Patients fed only over REST have no monitor binding and are not covered.
+    /// </remarks>
+    public async Task SweepSilentAsync(DateTimeOffset now, TimeSpan silentAfter, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var silent = new Dictionary<string, MonitorBindingDto>(StringComparer.Ordinal);
+            foreach (var monitor in _bindings.GetAll())
+            {
+                if (monitor.PatientId is { } patientId && now - monitor.LastSeen > silentAfter)
+                {
+                    silent.TryAdd(patientId, monitor);
+                }
+            }
+
+            await _pipeline.ReconcileMonitorSilenceAsync(silent, now, ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>Moves a patient to another monitor by hand, and tells the monitor where it can be told.</summary>
     public async Task<TransferOutcome> TransferAsync(string patientId, string monitorIp, CancellationToken ct)
+    {
+        var outcome = await BindAsync(patientId, monitorIp, ct);
+
+        // Outside the gate: a monitor that is off takes seconds to give up on, and the feed
+        // must not wait for it.
+        if (outcome is { Kind: TransferOutcomeKind.Moved, Result: { } moved })
+        {
+            await WriteToMonitorAsync(monitorIp, moved.Patient, nameOnly: false, ct);
+        }
+
+        return outcome;
+    }
+
+    private async Task<TransferOutcome> BindAsync(string patientId, string monitorIp, CancellationToken ct)
     {
         await _gate.WaitAsync(ct);
         try

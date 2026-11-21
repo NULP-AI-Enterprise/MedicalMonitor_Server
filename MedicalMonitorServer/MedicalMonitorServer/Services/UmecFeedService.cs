@@ -78,6 +78,41 @@ public sealed class UmecFeedService : BackgroundService
 
     private void Enqueue(UmecMessage message) => _queue.Writer.TryWrite(message);
 
+    /// <summary>
+    /// How often each monitor's traffic is summed up in one Information line.
+    /// The per-message detail stays at Debug: at about ten messages a second it
+    /// would push the alert history out of the log file.
+    /// </summary>
+    public TimeSpan SummaryInterval { get; set; } = TimeSpan.FromMinutes(1);
+
+    private readonly FeedSummary _summary = new();
+
+    private void Summarise(string monitorIp, string? patientId, UmecVitalsMessage? oru)
+    {
+        var line = _summary.Add(
+            monitorIp.Length == 0 ? "(unknown)" : monitorIp,
+            patientId,
+            oru?.Vitals.Count(v => v.Value is not null) ?? 0,
+            oru?.Alarms.Count(a => a.AlarmId != 0) ?? 0,
+            DateTimeOffset.UtcNow,
+            SummaryInterval);
+
+        if (line is not { } summary) return;
+
+        // The reason for a drop is logged where it is decided, see MonitorRouter.LogDrop.
+        _logger.LogInformation(
+            "uMec feed from {MonitorIp} for patient {PatientId}: {Messages} messages in {Seconds:0} s, " +
+            "{Vitals} measured values, {Alarms} active alarm entries, " +
+            "{Dropped} messages with data dropped for lack of a patient.",
+            summary.MonitorIp,
+            summary.PatientId ?? "(none)",
+            summary.Messages,
+            summary.Elapsed.TotalSeconds,
+            summary.Vitals,
+            summary.Alarms,
+            summary.Dropped);
+    }
+
     private async Task HandleAsync(UmecMessage message, CancellationToken ct)
     {
         var info = message.Oru?.Patient ?? message.Adt?.Patient;
@@ -115,6 +150,11 @@ public sealed class UmecFeedService : BackgroundService
         }
 
         var patientId = await _router.ResolveAsync(monitorIp, info, hasReadings, ct);
+
+        // Before the early return below, or the messages that were dropped for lack
+        // of a patient would be exactly the ones the summary never saw.
+        Summarise(monitorIp, patientId, oru);
+
         if (oru is null || patientId is null) return;
 
         if (oru.WaveChannels.Count > 0)
@@ -139,7 +179,15 @@ public sealed class UmecFeedService : BackgroundService
         }
 
         var waveforms = ToWaveforms(monitorIp, oru.WaveSamples);
-        if (!hasReadings)
+        if (oru.ScaledWaves.Count > 0)
+        {
+            // A Nihon Kohden over LS-NET: no descriptors to scale by, the driver did it.
+            waveforms = (waveforms ?? Array.Empty<WaveformSampleDto>())
+                .Concat(oru.ScaledWaves.Select(w => new WaveformSampleDto(w.Type, w.Samples, w.SampleRate)))
+                .ToArray();
+        }
+        // A complete report with no value in it is news too: every sensor is off.
+        if (!hasReadings && !oru.VitalsAreComplete)
         {
             // The monitor sends samples in a message of their own, without values.
             if (waveforms is not null)
@@ -150,7 +198,7 @@ public sealed class UmecFeedService : BackgroundService
             return;
         }
 
-        await _pipeline.IngestReadingsAsync(patientId, readings, waveforms, DateTimeOffset.UtcNow, ct);
+        await _pipeline.IngestReadingsAsync(patientId, readings, waveforms, DateTimeOffset.UtcNow, ct, oru.VitalsAreComplete);
     }
 
     private void RememberChannels(string monitorIp, IEnumerable<WaveChannel> channels)
