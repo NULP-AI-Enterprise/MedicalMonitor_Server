@@ -36,7 +36,30 @@ internal enum LsNetKind
 /// First status byte, bit 0x40: set when the alarm starts, cleared by Silence Alarms on the
 /// monitor while <paramref name="Alarm"/> stays as it is.
 /// </param>
-internal readonly record struct LsNetNumeric(ushort Code, int? Value, byte Alarm = LsNetAlarm.None, bool Sounding = false);
+/// <param name="State">
+/// Fifth status byte: the technical state of the parameter, read like <see cref="LsNetState"/>.
+/// 0x40 when there is nothing to say, 0x45 with a message code behind it while a cuff
+/// measurement runs (code 0x1E) or the parameter is switched off (0x21).
+/// </param>
+/// <param name="StateCode">Sixth status byte: which message <paramref name="State"/> is about.</param>
+internal readonly record struct LsNetNumeric(
+    ushort Code, int? Value, byte Alarm = LsNetAlarm.None, bool Sounding = false, byte State = LsNetAlarm.None, byte StateCode = 0);
+
+/// <summary>
+/// A state byte of the numeric block: the alarm level in the high half, as in
+/// <see cref="LsNetAlarm"/>, and the kind in the low half. Seen: 0x40 nothing, 0x24 a technical
+/// alarm at the advisory level ("check electrodes", shown in blue), 0x45 a message that is not
+/// an alarm. The monitor's summary of its technical state is the second of four such pairs in
+/// the block header, each a state byte and a message code.
+/// </summary>
+internal static class LsNetState
+{
+    /// <summary>The alarm level of a state byte; <see cref="LsNetAlarm.None"/> for a mere message.</summary>
+    public static byte LevelOf(byte state) => (byte)(state & 0xF0);
+
+    /// <summary>The one message code whose meaning is known: an ECG electrode is off.</summary>
+    public const byte CheckElectrodes = 0x01;
+}
 
 /// <summary>
 /// Values of the alarm byte of a numeric record. Read off a BSM-3562 while its limits were moved
@@ -80,6 +103,12 @@ internal sealed class LsNetDatagram
 
     /// <summary>Null when the datagram carries no numeric block (or one in a layout not seen before).</summary>
     public IReadOnlyList<LsNetNumeric>? Numerics { get; init; }
+
+    /// <summary>With <see cref="Numerics"/>: the monitor's technical state, see <see cref="LsNetState"/>.</summary>
+    public byte TechnicalState { get; init; } = LsNetAlarm.None;
+
+    /// <summary>With <see cref="Numerics"/>: the message code of <see cref="TechnicalState"/>.</summary>
+    public byte TechnicalCode { get; init; }
 }
 
 /// <summary>
@@ -227,7 +256,10 @@ internal static class LsNetProtocol
         if (d[0] == 0x02 && d[1] == 0x0B) return ParseWaveforms(d);
         if (d[0] == 0x02 && d[1] == 0x12)
         {
-            return d.Length < 26 ? null : new LsNetDatagram { Kind = LsNetKind.Numerics, Numerics = ParseNumerics(d, 24) };
+            if (d.Length < 26) return null;
+
+            var numerics = ParseNumerics(d, 24, out byte state, out byte code);
+            return new LsNetDatagram { Kind = LsNetKind.Numerics, Numerics = numerics, TechnicalState = state, TechnicalCode = code };
         }
 
         if (d.Length < 32) return new LsNetDatagram { Kind = LsNetKind.Other };
@@ -302,12 +334,17 @@ internal static class LsNetProtocol
             at += 4 + 2 * count;
         }
 
+        byte technicalState = LsNetAlarm.None, technicalCode = 0;
+        var numerics = d[23] == 0x01 ? ParseNumerics(d, at, out technicalState, out technicalCode) : null;
+
         return new LsNetDatagram
         {
             Kind = LsNetKind.Waveforms,
             Sequence = BinaryPrimitives.ReadUInt16BigEndian(d[24..]),
             Waves = waves,
-            Numerics = d[23] == 0x01 ? ParseNumerics(d, at) : null,
+            Numerics = numerics,
+            TechnicalState = technicalState,
+            TechnicalCode = technicalCode,
         };
     }
 
@@ -315,12 +352,15 @@ internal static class LsNetProtocol
     /// The numeric block: a count and that many waveform codes the monitor can stream, 36 bytes
     /// not understood, a count, and that many 10-byte records - code (2), status (6), value
     /// (signed 16-bit big endian). The records must end exactly where the datagram does.
-    /// Of the six status bytes the first and the third are read (see <see cref="LsNetNumeric"/>);
-    /// the fifth and sixth differ for a parameter that is switched off (45 21 instead of 40 00)
-    /// and probably carry its technical state, which nothing was recorded to confirm.
+    /// Of the six status bytes of a record the first, third, fifth and sixth are read (see
+    /// <see cref="LsNetNumeric"/>). Of the 36 bytes, the last eight are four pairs of a state
+    /// byte and a message code; the second pair is the monitor's technical alarm, the fourth
+    /// repeats the highest limit alarm of the records.
     /// </summary>
-    private static List<LsNetNumeric>? ParseNumerics(ReadOnlySpan<byte> d, int at)
+    private static List<LsNetNumeric>? ParseNumerics(ReadOnlySpan<byte> d, int at, out byte technicalState, out byte technicalCode)
     {
+        technicalState = LsNetAlarm.None;
+        technicalCode = 0;
         if (at + 2 > d.Length) return null;
 
         int countAt = at + 2 + 2 * d[at] + 36;
@@ -329,6 +369,9 @@ internal static class LsNetProtocol
         int count = d[countAt];
         int records = countAt + 2;
         if (records + 10 * count != d.Length) return null;
+
+        technicalState = d[countAt - 6];
+        technicalCode = d[countAt - 5];
 
         var numerics = new List<LsNetNumeric>(count);
         for (int i = 0; i < count; i++)
@@ -339,7 +382,9 @@ internal static class LsNetProtocol
                 BinaryPrimitives.ReadUInt16BigEndian(record),
                 value == NoValue ? null : value,
                 Alarm: record[4],
-                Sounding: (record[2] & 0x40) != 0));
+                Sounding: (record[2] & 0x40) != 0,
+                State: record[6],
+                StateCode: record[7]));
         }
 
         return numerics;

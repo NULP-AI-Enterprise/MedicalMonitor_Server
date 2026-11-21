@@ -218,6 +218,31 @@ public class NihonKohdenLsNetTests
         Assert.Equal((LsNetAlarm.Warning, false), (silenced.Alarm, silenced.Sounding));
     }
 
+    [Fact]
+    public void An_electrode_that_is_off_is_a_technical_alarm_of_the_monitor_and_no_heart_rate()
+    {
+        var off = Parsed("technical-electrodes-off");
+
+        Assert.Equal((0x24, LsNetState.CheckElectrodes), (off.TechnicalState, off.TechnicalCode));
+        Assert.Equal(LsNetAlarm.Advisory, LsNetState.LevelOf(off.TechnicalState));      // blue on the monitor
+        Assert.Null(off.Numerics!.Single(n => n.Code == 0x0100).Value);                 // "---", not zero
+
+        Assert.Equal(LsNetAlarm.None, LsNetState.LevelOf(Parsed("technical-none").TechnicalState));
+    }
+
+    [Fact]
+    public void A_message_that_is_not_an_alarm_has_no_level()
+    {
+        // The monitor's own note after the electrode went back on, and "measuring" on the cuff values.
+        var note = Parsed("technical-message-only");
+        Assert.Equal(0x45, note.TechnicalState);
+        Assert.Equal(LsNetAlarm.None, LsNetState.LevelOf(note.TechnicalState));
+
+        var cuff = Parsed("technical-nibp-measuring").Numerics!.Single(n => n.Code == 0x0900);
+        Assert.Equal((0x45, 0x1E), (cuff.State, cuff.StateCode));
+        Assert.Equal(LsNetAlarm.None, LsNetState.LevelOf(cuff.State));
+    }
+
     // ------------------------------------------------------------ the provider
 
     private sealed class FakeTransport : ILsNetTransport
@@ -397,6 +422,49 @@ public class NihonKohdenLsNetTests
         Assert.Equal(
             new[] { ("SpO2 limit alarm", AlarmLevel.High), ("SpO2 limit alarm", AlarmLevel.Medium), ("Skin temperature limit alarm", AlarmLevel.Low) },
             Alarms(messages).Select(m => m.Oru!.Alarms.Single()).Select(a => (a.Text, a.Level)));
+    }
+
+    private static List<UmecMessage> Technical(List<UmecMessage> messages)
+    {
+        lock (messages) { return messages.Where(m => m.Kind == UmecMessageKind.TechnicalAlarms).ToList(); }
+    }
+
+    [Fact]
+    public async Task Check_electrodes_reaches_the_feed_as_a_technical_alarm_and_goes_when_they_are_back()
+    {
+        var transport = new FakeTransport();
+        using var provider = Provider(transport);
+        var messages = Collect(provider);
+        provider.Start();
+
+        transport.Deliver("technical-electrodes-off");
+        await Wait.UntilAsync(() => Technical(messages).Count == 1, "the technical alarm is passed on");
+
+        var alarm = Assert.Single(Technical(messages)[0].Oru!.Alarms);
+        Assert.Equal(("Check electrodes", AlarmCategory.Technical, AlarmLevel.Low), (alarm.Text, alarm.Category, alarm.Level));
+
+        // The heart rate went with the signal: the report lists it without a value.
+        Assert.DoesNotContain(Reports(messages)[0].Oru!.Vitals, v => v.ParameterId == 101 && v.Value is not null);
+
+        // Electrode back on: first the monitor's note, which is no alarm, then nothing.
+        transport.Deliver("technical-message-only");
+        await Wait.UntilAsync(() => Technical(messages).Count == 2, "the end of the alarm is passed on");
+        Assert.Empty(Technical(messages)[1].Oru!.Alarms);
+    }
+
+    [Fact]
+    public async Task A_cuff_measurement_in_progress_is_not_an_alarm()
+    {
+        var transport = new FakeTransport();
+        using var provider = Provider(transport);
+        var messages = Collect(provider);
+        provider.Start();
+
+        transport.Deliver("technical-nibp-measuring");
+        await Wait.UntilAsync(() => Technical(messages).Count == 1, "the technical list is passed on");
+
+        Assert.Empty(Technical(messages)[0].Oru!.Alarms);
+        Assert.Empty(Alarms(messages)[0].Oru!.Alarms);
     }
 
     [Fact]

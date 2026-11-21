@@ -31,6 +31,9 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
 
     // 072044: the same pulse rate as 044006 under a second code, alarming with it. One alert is enough.
     private const ushort DuplicatePulseRate = 0x482C;
+
+    // Ids of the technical alarms on the station, clear of the parameter codes the limit alarms use.
+    private const int TechnicalAlarmBase = 0x10000;
     private static readonly TimeSpan Tick = TimeSpan.FromMilliseconds(100);
 
     private readonly CancellationTokenSource _stopping = new();
@@ -64,6 +67,8 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         public HashSet<ushort> UnknownWaves = new();
         public string AlarmSignature = "";
         public TimeSpan LastAlarms = TimeSpan.MinValue;
+        public string TechnicalSignature = "";
+        public TimeSpan LastTechnical = TimeSpan.MinValue;
     }
 
     /// <param name="monitors">The monitors to read; those not set to LS-NET are ignored.</param>
@@ -258,6 +263,7 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
                 {
                     // Whoever the next report is routed to has not been told the alarms yet.
                     bed.LastAlarms = TimeSpan.MinValue;
+                    bed.LastTechnical = TimeSpan.MinValue;
                 }
 
                 bed.PatientId = datagram.PatientId;
@@ -339,8 +345,84 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
             Oru = oru,
         });
 
-        if (datagram.Numerics is not null) PassOnAlarms(bed, datagram.Numerics);
+        if (datagram.Numerics is not null)
+        {
+            PassOnAlarms(bed, datagram.Numerics);
+            PassOnTechnicalAlarms(bed, datagram);
+        }
     }
+
+    /// <summary>
+    /// The monitor's technical alarms - a sensor that is off, not a value out of limits. There is
+    /// one for the monitor as a whole in the block header, and each parameter can carry its own.
+    /// A state that is only a message ("measuring", "off") is not an alarm and is left out.
+    /// </summary>
+    private void PassOnTechnicalAlarms(Bed bed, LsNetDatagram datagram)
+    {
+        var oru = new UmecVitalsMessage();
+
+        if (LsNetState.LevelOf(datagram.TechnicalState) != LsNetAlarm.None)
+        {
+            oru.Alarms.Add(TechnicalAlarm(
+                TechnicalAlarmBase + datagram.TechnicalCode,
+                datagram.TechnicalCode == LsNetState.CheckElectrodes
+                    ? "Check electrodes"
+                    : $"Monitor technical alarm {datagram.TechnicalCode:X2}",
+                datagram.TechnicalState));
+        }
+
+        foreach (var numeric in datagram.Numerics!)
+        {
+            if (LsNetState.LevelOf(numeric.State) == LsNetAlarm.None || numeric.Code == DuplicatePulseRate) continue;
+
+            var code = NihonKohdenCodes.FromBytes((byte)(numeric.Code >> 8), (byte)numeric.Code);
+            oru.Alarms.Add(TechnicalAlarm(
+                2 * TechnicalAlarmBase + numeric.Code,
+                $"{NihonKohdenCodes.Label(code)} technical alarm {numeric.StateCode:X2}",
+                numeric.State));
+        }
+
+        var signature = string.Join(",", oru.Alarms.Select(a => $"{a.AlarmId:X}:{a.LevelCode:X2}"));
+        var now = _clock.Elapsed;
+        if (signature == bed.TechnicalSignature && bed.LastTechnical != TimeSpan.MinValue && now - bed.LastTechnical < AlarmRefresh) return;
+
+        if (signature != bed.TechnicalSignature)
+        {
+            _logger.LogInformation("Nihon Kohden monitor {Ip}: technical alarms now [{Alarms}].", bed.State.IpAddress,
+                string.Join(", ", oru.Alarms.Select(a => $"{a.Text} ({a.Level})")));
+        }
+
+        bed.TechnicalSignature = signature;
+        bed.LastTechnical = now;
+
+        OnMessageReceived?.Invoke(new UmecMessage
+        {
+            Kind = UmecMessageKind.TechnicalAlarms,
+            MessageType = "LS-NET",
+            ReceivedAt = DateTime.Now,
+            SourceIp = bed.State.IpAddress,
+            Oru = oru,
+        });
+    }
+
+    private static ActiveAlarm TechnicalAlarm(int id, string text, byte state) => new()
+    {
+        Category = AlarmCategory.Technical,
+        TypeCode = 3,
+        AlarmId = id,
+        Text = text,
+        LevelCode = state,
+        Level = LevelOf(LsNetState.LevelOf(state)),
+        RaisedAt = DateTime.Now,
+    };
+
+    private static AlarmLevel LevelOf(byte alarm) => alarm switch
+    {
+        LsNetAlarm.Crisis => AlarmLevel.High,
+        LsNetAlarm.Warning => AlarmLevel.Medium,
+        LsNetAlarm.Advisory => AlarmLevel.Low,
+        _ => AlarmLevel.Unknown,        // not one of the monitor's three levels
+    };
 
     /// <summary>
     /// The monitor's limit alarms, as their own message: the feed takes a list of alarms as all
@@ -361,13 +443,7 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
                 AlarmId = numeric.Code,
                 Text = $"{NihonKohdenCodes.Label(code)} limit alarm",
                 LevelCode = numeric.Alarm,
-                Level = numeric.Alarm switch
-                {
-                    LsNetAlarm.Crisis => AlarmLevel.High,
-                    LsNetAlarm.Warning => AlarmLevel.Medium,
-                    LsNetAlarm.Advisory => AlarmLevel.Low,
-                    _ => AlarmLevel.Unknown,        // not one of the monitor's three levels
-                },
+                Level = LevelOf(numeric.Alarm),
                 RaisedAt = DateTime.Now,
             });
         }
@@ -465,6 +541,7 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         bed.LastSequence = -1;
         bed.LastPatientQuery = TimeSpan.MinValue;
         bed.LastAlarms = TimeSpan.MinValue;
+        bed.LastTechnical = TimeSpan.MinValue;
         _logger.LogInformation("Nihon Kohden monitor {Ip} is streaming over LS-NET.", bed.State.IpAddress);
         OnDeviceConnected?.Invoke(this, bed.State);
     }
