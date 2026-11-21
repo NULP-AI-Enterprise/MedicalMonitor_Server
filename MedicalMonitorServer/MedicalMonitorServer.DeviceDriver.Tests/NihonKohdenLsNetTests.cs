@@ -184,6 +184,37 @@ public class NihonKohdenLsNetTests
         Assert.Null(packet.Numerics);
     }
 
+    // ------------------------------------------------------------ the monitor's alarms
+
+    private static LsNetNumeric Record(string packet, ushort code) => Parsed(packet).Numerics!.Single(n => n.Code == code);
+
+    [Fact]
+    public void A_value_within_its_limits_carries_no_alarm()
+    {
+        Assert.All(Parsed("alarm-none").Numerics!, n => Assert.Equal(LsNetAlarm.None, n.Alarm));
+    }
+
+    [Fact]
+    public void A_limit_alarm_is_on_the_record_of_the_value_with_its_level()
+    {
+        // The same SpO2 alarm, before and after its priority was changed on the monitor.
+        Assert.Equal(LsNetAlarm.Warning, Record("alarm-warning-spo2", 0x0700).Alarm);
+        Assert.Equal(LsNetAlarm.Crisis, Record("alarm-crisis-spo2", 0x0700).Alarm);
+
+        // Nothing else alarms with it.
+        Assert.Single(Parsed("alarm-crisis-spo2").Numerics!, n => n.Alarm != LsNetAlarm.None);
+    }
+
+    [Fact]
+    public void Silence_Alarms_on_the_monitor_stops_the_sound_not_the_alarm()
+    {
+        var sounding = Record("alarm-warning-pr", 0x2C06);
+        var silenced = Record("alarm-silenced-pr", 0x2C06);
+
+        Assert.Equal((LsNetAlarm.Warning, true), (sounding.Alarm, sounding.Sounding));
+        Assert.Equal((LsNetAlarm.Warning, false), (silenced.Alarm, silenced.Sounding));
+    }
+
     // ------------------------------------------------------------ the provider
 
     private sealed class FakeTransport : ILsNetTransport
@@ -262,9 +293,8 @@ public class NihonKohdenLsNetTests
         transport.Deliver("beacon", port: LsNetProtocol.ControlPort);
         transport.Deliver("wave1-0");
 
-        await Wait.UntilAsync(() => { lock (messages) { return messages.Count == 1; } }, "the packet is passed on");
-        UmecMessage message;
-        lock (messages) { message = messages[0]; }
+        await Wait.UntilAsync(() => Reports(messages).Count == 1, "the packet is passed on");
+        var message = Reports(messages)[0];
 
         Assert.Equal(UmecMessageKind.Vitals, message.Kind);
         Assert.Equal("10.10.46.48", message.SourceIp);
@@ -312,6 +342,71 @@ public class NihonKohdenLsNetTests
         Assert.All(message.Oru.ScaledWaves[1].Samples, s => Assert.InRange(s, -0.5f, 0.5f));
     }
 
+    /// <summary>The reports with values in them; each also brings a list of alarms, a message of its own.</summary>
+    private static List<UmecMessage> Reports(List<UmecMessage> messages)
+    {
+        lock (messages) { return messages.Where(m => m.Kind == UmecMessageKind.Vitals).ToList(); }
+    }
+
+    private static List<UmecMessage> Alarms(List<UmecMessage> messages)
+    {
+        lock (messages) { return messages.Where(m => m.Kind == UmecMessageKind.PhysiologicalAlarms).ToList(); }
+    }
+
+    [Fact]
+    public async Task The_monitors_alarms_reach_the_feed_as_the_whole_list_with_their_level()
+    {
+        var transport = new FakeTransport();
+        using var provider = Provider(transport);
+        var messages = Collect(provider);
+        provider.Start();
+
+        transport.Deliver("alarm-warning-pr");
+        await Wait.UntilAsync(() => Alarms(messages).Count == 1, "the alarm is passed on");
+
+        // 044006 and its twin 072044 alarm together; the station gets one alert.
+        var alarm = Assert.Single(Alarms(messages)[0].Oru!.Alarms);
+        Assert.Equal((0x2C06, "PR (ART) limit alarm", AlarmLevel.Medium, AlarmCategory.Physiological),
+            (alarm.AlarmId, alarm.Text, alarm.Level, alarm.Category));
+        Assert.Equal("10.10.46.48", Alarms(messages)[0].SourceIp);
+
+        transport.Deliver("alarm-crisis-spo2");
+        await Wait.UntilAsync(() => Alarms(messages).Count == 2, "the changed list is passed on");
+        alarm = Assert.Single(Alarms(messages)[1].Oru!.Alarms);
+        Assert.Equal((0x0700, "SpO2 limit alarm", AlarmLevel.High), (alarm.AlarmId, alarm.Text, alarm.Level));
+    }
+
+    [Fact]
+    public async Task When_the_alarm_ends_the_feed_is_told_with_an_empty_list()
+    {
+        var transport = new FakeTransport();
+        using var provider = Provider(transport);
+        var messages = Collect(provider);
+        provider.Start();
+
+        transport.Deliver("alarm-warning-spo2");
+        await Wait.UntilAsync(() => Alarms(messages).Count == 1, "the alarm is passed on");
+
+        transport.Deliver("alarm-none");
+        await Wait.UntilAsync(() => Alarms(messages).Count == 2, "its end is passed on");
+
+        Assert.Empty(Alarms(messages)[1].Oru!.Alarms);
+    }
+
+    [Fact]
+    public async Task An_unchanged_list_is_not_repeated_every_second()
+    {
+        var transport = new FakeTransport();
+        using var provider = Provider(transport);
+        var messages = Collect(provider);
+        provider.Start();
+
+        for (int i = 0; i < 5; i++) transport.Deliver("alarm-warning-spo2");
+
+        await Wait.UntilAsync(() => Reports(messages).Count == 5, "all five reports are passed on");
+        Assert.Single(Alarms(messages));
+    }
+
     [Fact]
     public async Task The_patient_id_the_monitor_reports_goes_with_the_values()
     {
@@ -321,19 +416,17 @@ public class NihonKohdenLsNetTests
         provider.Start();
 
         transport.Deliver("wave1-0");
-        await Wait.UntilAsync(() => { lock (messages) { return messages.Count == 1; } }, "the first values are in");
-        lock (messages) { Assert.False(messages[0].Oru!.Patient!.PidPresent); }     // nobody has been asked yet
+        await Wait.UntilAsync(() => Reports(messages).Count == 1, "the first values are in");
+        Assert.False(Reports(messages)[0].Oru!.Patient!.PidPresent);     // nobody has been asked yet
 
         await Wait.UntilAsync(() => transport.Count(LsNetProtocol.PatientType) >= 1, "the monitor is asked who its patient is");
         transport.Deliver("patient-response", port: LsNetProtocol.ControlPort);
         transport.Deliver("wave1-4");
 
-        await Wait.UntilAsync(() => { lock (messages) { return messages.Count == 2; } }, "the next values are in");
-        lock (messages)
-        {
-            Assert.True(messages[1].Oru!.Patient!.PidPresent);
-            Assert.Equal("P-0017", messages[1].Oru!.Patient!.PatientId);
-        }
+        await Wait.UntilAsync(() => Reports(messages).Count == 2, "the next values are in");
+        var second = Reports(messages)[1].Oru!.Patient!;
+        Assert.True(second.PidPresent);
+        Assert.Equal("P-0017", second.PatientId);
     }
 
     [Fact]

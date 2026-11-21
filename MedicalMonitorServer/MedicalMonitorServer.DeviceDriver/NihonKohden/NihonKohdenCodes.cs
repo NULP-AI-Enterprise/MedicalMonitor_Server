@@ -26,6 +26,28 @@ internal static class NihonKohdenCodes
         ["044006"] = (600, "Pulse Rate (PR)"),      // from the arterial line
     };
 
+    /// <summary>What the monitor calls the parameters it was seen to send, for texts made here.</summary>
+    private static readonly Dictionary<string, string> Labels = new()
+    {
+        ["001000"] = "HR",
+        ["002000"] = "VPC",
+        ["003000"] = "ST I", ["003001"] = "ST II", ["003002"] = "ST III",
+        ["003003"] = "ST aVR", ["003004"] = "ST aVL", ["003005"] = "ST aVF",
+        ["003006"] = "ST V1", ["003007"] = "ST V2", ["003008"] = "ST V3",
+        ["003009"] = "ST V4", ["003010"] = "ST V5", ["003011"] = "ST V6",
+        ["007000"] = "SpO2",
+        ["007001"] = "PR (SpO2)",
+        ["009000"] = "NIBP systolic", ["009001"] = "NIBP diastolic", ["009002"] = "NIBP mean",
+        ["011000"] = "Skin temperature",
+        ["014000"] = "Rectal temperature",
+        ["044000"] = "ART systolic", ["044001"] = "ART diastolic", ["044002"] = "ART mean",
+        ["044006"] = "PR (ART)",
+        ["053000"] = "CVP systolic", ["053001"] = "CVP diastolic", ["053002"] = "CVP mean",
+    };
+
+    /// <summary>The monitor's name for a parameter; the code itself for one never seen named.</summary>
+    public static string Label(string code) => Labels.TryGetValue(code, out var label) ? label : $"Parameter {code}";
+
     /// <summary>
     /// Mindray ids for the first and second temperature of a report. The monitor has a code
     /// per probe site, so sites are numbered in the order they are sent.

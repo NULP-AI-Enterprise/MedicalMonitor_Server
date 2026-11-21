@@ -28,7 +28,28 @@ internal enum LsNetKind
 
 /// <param name="Code">Nihon Kohden parameter code as its two wire bytes, high first (0x0700 = SpO2).</param>
 /// <param name="Value">Whole number as sent; null when the monitor has no value (0x8000).</param>
-internal readonly record struct LsNetNumeric(ushort Code, int? Value);
+/// <param name="Alarm">
+/// The monitor's own limit alarm on the value, third status byte of the record:
+/// <see cref="LsNetAlarm.None"/> while it is within its limits.
+/// </param>
+/// <param name="Sounding">
+/// First status byte, bit 0x40: set when the alarm starts, cleared by Silence Alarms on the
+/// monitor while <paramref name="Alarm"/> stays as it is.
+/// </param>
+internal readonly record struct LsNetNumeric(ushort Code, int? Value, byte Alarm = LsNetAlarm.None, bool Sounding = false);
+
+/// <summary>
+/// Values of the alarm byte of a numeric record. Read off a BSM-3562 while its limits were moved
+/// to raise alarms: the same alarm went from <see cref="Warning"/> to <see cref="Crisis"/> the
+/// moment its priority was changed on the monitor from the yellow level to the red one. The
+/// monitor has a third, lowest level (advisory) that was not raised; its value is not known.
+/// </summary>
+internal static class LsNetAlarm
+{
+    public const byte Crisis = 0x00;
+    public const byte Warning = 0x10;
+    public const byte None = 0x40;
+}
 
 /// <param name="Code">Waveform code: 0x0100-0x010B the ECG leads I..V6, 0x0700 pleth, 0x2C00 arterial pressure.</param>
 internal sealed record LsNetWave(ushort Code, short[] Samples);
@@ -292,6 +313,9 @@ internal static class LsNetProtocol
     /// The numeric block: a count and that many waveform codes the monitor can stream, 36 bytes
     /// not understood, a count, and that many 10-byte records - code (2), status (6), value
     /// (signed 16-bit big endian). The records must end exactly where the datagram does.
+    /// Of the six status bytes the first and the third are read (see <see cref="LsNetNumeric"/>);
+    /// the fifth and sixth differ for a parameter that is switched off (45 21 instead of 40 00)
+    /// and probably carry its technical state, which nothing was recorded to confirm.
     /// </summary>
     private static List<LsNetNumeric>? ParseNumerics(ReadOnlySpan<byte> d, int at)
     {
@@ -309,7 +333,11 @@ internal static class LsNetProtocol
         {
             var record = d.Slice(records + 10 * i, 10);
             short value = BinaryPrimitives.ReadInt16BigEndian(record[8..]);
-            numerics.Add(new LsNetNumeric(BinaryPrimitives.ReadUInt16BigEndian(record), value == NoValue ? null : value));
+            numerics.Add(new LsNetNumeric(
+                BinaryPrimitives.ReadUInt16BigEndian(record),
+                value == NoValue ? null : value,
+                Alarm: record[4],
+                Sounding: (record[2] & 0x40) != 0));
         }
 
         return numerics;

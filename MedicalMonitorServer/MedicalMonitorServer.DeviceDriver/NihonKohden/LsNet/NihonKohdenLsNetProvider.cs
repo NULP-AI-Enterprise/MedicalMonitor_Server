@@ -24,6 +24,13 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
     private static readonly TimeSpan SubscribeRetry = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan StreamQuiet = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PatientQueryInterval = TimeSpan.FromSeconds(10);
+
+    // The alarm list is passed on when it changes, and this often regardless: a patient bound to
+    // the monitor after the alarm started must get it too.
+    private static readonly TimeSpan AlarmRefresh = TimeSpan.FromSeconds(10);
+
+    // 072044: the same pulse rate as 044006 under a second code, alarming with it. One alert is enough.
+    private const ushort DuplicatePulseRate = 0x482C;
     private static readonly TimeSpan Tick = TimeSpan.FromMilliseconds(100);
 
     private readonly CancellationTokenSource _stopping = new();
@@ -55,6 +62,8 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         public int LastSequence = -1;
         public long Lost;
         public HashSet<ushort> UnknownWaves = new();
+        public string AlarmSignature = "";
+        public TimeSpan LastAlarms = TimeSpan.MinValue;
     }
 
     /// <param name="monitors">The monitors to read; those not set to LS-NET are ignored.</param>
@@ -245,6 +254,12 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
                 break;
 
             case LsNetKind.Response when datagram.Type == LsNetProtocol.PatientType + 1:
+                if (!bed.PatientKnown || bed.PatientId != datagram.PatientId)
+                {
+                    // Whoever the next report is routed to has not been told the alarms yet.
+                    bed.LastAlarms = TimeSpan.MinValue;
+                }
+
                 bed.PatientId = datagram.PatientId;
                 bed.PatientKnown = true;
                 break;
@@ -323,6 +338,60 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
             SourceIp = bed.State.IpAddress,
             Oru = oru,
         });
+
+        if (datagram.Numerics is not null) PassOnAlarms(bed, datagram.Numerics);
+    }
+
+    /// <summary>
+    /// The monitor's limit alarms, as their own message: the feed takes a list of alarms as all
+    /// that are active on the monitor, so it is the whole list every time, empty when there is none.
+    /// </summary>
+    private void PassOnAlarms(Bed bed, IReadOnlyList<LsNetNumeric> numerics)
+    {
+        var oru = new UmecVitalsMessage();
+        foreach (var numeric in numerics)
+        {
+            if (numeric.Alarm == LsNetAlarm.None || numeric.Code == DuplicatePulseRate) continue;
+
+            var code = NihonKohdenCodes.FromBytes((byte)(numeric.Code >> 8), (byte)numeric.Code);
+            oru.Alarms.Add(new ActiveAlarm
+            {
+                Category = AlarmCategory.Physiological,
+                TypeCode = 1,
+                AlarmId = numeric.Code,
+                Text = $"{NihonKohdenCodes.Label(code)} limit alarm",
+                LevelCode = numeric.Alarm,
+                Level = numeric.Alarm switch
+                {
+                    LsNetAlarm.Crisis => AlarmLevel.High,
+                    LsNetAlarm.Warning => AlarmLevel.Medium,
+                    _ => AlarmLevel.Unknown,        // the advisory level, or a value not seen yet
+                },
+                RaisedAt = DateTime.Now,
+            });
+        }
+
+        var signature = string.Join(",", oru.Alarms.Select(a => $"{a.AlarmId:X4}:{a.LevelCode:X2}"));
+        var now = _clock.Elapsed;
+        if (signature == bed.AlarmSignature && bed.LastAlarms != TimeSpan.MinValue && now - bed.LastAlarms < AlarmRefresh) return;
+
+        if (signature != bed.AlarmSignature)
+        {
+            _logger.LogInformation("Nihon Kohden monitor {Ip}: limit alarms now [{Alarms}].", bed.State.IpAddress,
+                string.Join(", ", oru.Alarms.Select(a => $"{a.Text} ({a.Level})")));
+        }
+
+        bed.AlarmSignature = signature;
+        bed.LastAlarms = now;
+
+        OnMessageReceived?.Invoke(new UmecMessage
+        {
+            Kind = UmecMessageKind.PhysiologicalAlarms,
+            MessageType = "LS-NET",
+            ReceivedAt = DateTime.Now,
+            SourceIp = bed.State.IpAddress,
+            Oru = oru,
+        });
     }
 
     /// <summary>
@@ -394,6 +463,7 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
 
         bed.LastSequence = -1;
         bed.LastPatientQuery = TimeSpan.MinValue;
+        bed.LastAlarms = TimeSpan.MinValue;
         _logger.LogInformation("Nihon Kohden monitor {Ip} is streaming over LS-NET.", bed.State.IpAddress);
         OnDeviceConnected?.Invoke(this, bed.State);
     }
