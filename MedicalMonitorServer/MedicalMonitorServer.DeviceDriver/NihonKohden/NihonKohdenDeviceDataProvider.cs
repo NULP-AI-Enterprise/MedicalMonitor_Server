@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using MedicalMonitorServer.Contracts.Models;
@@ -40,6 +41,12 @@ public sealed class NihonKohdenDeviceDataProvider : IDeviceDataProvider, IMonito
     private int _adtSequence;
     private int _started;
 
+    /// <summary>How often a live link says so; see <see cref="KeepSeenAsync"/>.</summary>
+    internal TimeSpan LinkAliveInterval { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>How long after a report the link still counts as live: one and a half report intervals.</summary>
+    internal TimeSpan ReportGrace { get; set; }
+
     /// <param name="readerFactory">Makes the reader for one session; tests substitute it to drive a link without a monitor.</param>
     /// <param name="adtExchange">Carries one ADT message to a monitor; tests substitute it.</param>
     public NihonKohdenDeviceDataProvider(
@@ -58,6 +65,7 @@ public sealed class NihonKohdenDeviceDataProvider : IDeviceDataProvider, IMonito
         _parser = parser ?? new NihonKohdenParser();
         _adtExchange = adtExchange ??
             ((ip, port, message, ct) => NihonKohdenAdt.ExchangeAsync(ip, port, message, AdtTimeout, ct));
+        ReportGrace = TimeSpan.FromSeconds(Math.Max(1, options.ReportIntervalSeconds) * 1.5);
     }
 
     public event Action<IDeviceDataProvider, DeviceState>? OnDeviceConnected;
@@ -117,6 +125,7 @@ public sealed class NihonKohdenDeviceDataProvider : IDeviceDataProvider, IMonito
             // Completed once the stream is open; a message that arrives first waits for it.
             var link = new TaskCompletionSource<IMonitorLink>(TaskCreationOptions.RunContinuationsAsynchronously);
             int messages = 0;
+            long lastReport = Stopwatch.GetTimestamp();     // a new link is given one interval to report
 
             try
             {
@@ -127,12 +136,13 @@ public sealed class NihonKohdenDeviceDataProvider : IDeviceDataProvider, IMonito
                     {
                         await HandleAsync(state, data, await link.Task.WaitAsync(ct), ct);
                         messages++;
+                        Volatile.Write(ref lastReport, Stopwatch.GetTimestamp());
                     },
                     (opened, ct) =>
                     {
                         link.TrySetResult(opened);
                         MarkUp(state);
-                        return Task.Delay(Timeout.Infinite, ct);
+                        return KeepSeenAsync(state, () => Volatile.Read(ref lastReport), ct);
                     },
                     cancellationToken);
 
@@ -170,6 +180,30 @@ public sealed class NihonKohdenDeviceDataProvider : IDeviceDataProvider, IMonito
             {
                 break;
             }
+        }
+    }
+
+    /// <summary>
+    /// The monitor reports once a minute at best, but the server calls a monitor silent - blanks
+    /// its values and raises an alarm - after a much shorter quiet (Health:StaleAfterSeconds).
+    /// So between reports a link that is up and reporting on schedule says so, with a message
+    /// that carries nothing but where it comes from. A monitor that misses its report stops
+    /// being vouched for and is then caught like any other silent one.
+    /// </summary>
+    private async Task KeepSeenAsync(DeviceState state, Func<long> lastReport, CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(LinkAliveInterval);
+        while (await timer.WaitForNextTickAsync(cancellationToken))
+        {
+            if (Stopwatch.GetElapsedTime(lastReport()) > ReportGrace) continue;
+
+            OnMessageReceived?.Invoke(new UmecMessage
+            {
+                Kind = UmecMessageKind.MonitorStatus,
+                MessageType = "LINK",
+                ReceivedAt = DateTime.Now,
+                SourceIp = state.IpAddress,
+            });
         }
     }
 

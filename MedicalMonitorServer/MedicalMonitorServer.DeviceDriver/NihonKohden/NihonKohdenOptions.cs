@@ -90,4 +90,11 @@ public sealed class NihonKohdenOptions
     /// fastest, so this has to stay well above 60.
     /// </summary>
     public int ReadTimeoutSeconds { get; set; } = 180;
+
+    /// <summary>
+    /// The "ORU sampling" interval set on the monitors' HL7 page, in seconds: 60 is the shortest
+    /// it offers. A monitor on HL7 that has reported within one and a half of these is not
+    /// treated as silent by the server, however short Health:StaleAfterSeconds is.
+    /// </summary>
+    public int ReportIntervalSeconds { get; set; } = 60;
 }

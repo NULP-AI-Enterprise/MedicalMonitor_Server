@@ -64,6 +64,7 @@ public class DeviceService : IDeviceService, IMonitorAdmissions
                     Monitors = nihonKohden.Monitors.Where(m => !m.IsLsNet).ToList(),
                     ReconnectDelayMs = nihonKohden.ReconnectDelayMs,
                     ReadTimeoutSeconds = nihonKohden.ReadTimeoutSeconds,
+                    ReportIntervalSeconds = nihonKohden.ReportIntervalSeconds,
                 };
                 nihonKohdenProvider = new(hl7, loggerFactory?.CreateLogger<NihonKohdenDeviceDataProvider>());
                 _deviceDataProviders.Add(nihonKohdenProvider);

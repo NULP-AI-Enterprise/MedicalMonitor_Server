@@ -213,6 +213,47 @@ public class NihonKohdenTests
     }
 
     [Fact]
+    public async Task Between_reports_a_live_link_keeps_the_monitor_from_looking_silent()
+    {
+        var reader = new FakeReader(FakeReader.Delivers(Oru));
+        using var provider = Provider(reader);
+        provider.LinkAliveInterval = TimeSpan.FromMilliseconds(20);
+        var seen = new List<UmecMessage>();
+        provider.OnMessageReceived += m => { lock (seen) { seen.Add(m); } };
+
+        provider.Start();
+
+        await Wait.UntilAsync(() => { lock (seen) { return seen.Count(m => m.Kind == UmecMessageKind.MonitorStatus) >= 3; } },
+            "the link vouches for the monitor while the next report is due");
+        lock (seen)
+        {
+            var alive = seen.First(m => m.Kind == UmecMessageKind.MonitorStatus);
+            Assert.Equal("10.10.46.48", alive.SourceIp);
+            Assert.Null(alive.Oru);
+        }
+    }
+
+    [Fact]
+    public async Task A_monitor_that_misses_its_report_is_no_longer_vouched_for()
+    {
+        var reader = new FakeReader(FakeReader.StaysOpen);
+        using var provider = Provider(reader);
+        provider.LinkAliveInterval = TimeSpan.FromMilliseconds(20);
+        provider.ReportGrace = TimeSpan.FromMilliseconds(150);
+        int alive = 0;
+        provider.OnMessageReceived += m => { if (m.Kind == UmecMessageKind.MonitorStatus) Interlocked.Increment(ref alive); };
+
+        provider.Start();
+        await Wait.UntilAsync(() => Volatile.Read(ref alive) >= 1, "a new link is given its first interval");
+
+        await Task.Delay(400);          // well past the grace, with no report
+        int after = Volatile.Read(ref alive);
+        await Task.Delay(200);
+
+        Assert.Equal(after, Volatile.Read(ref alive));
+    }
+
+    [Fact]
     public async Task Devices_found_by_the_watchdog_are_not_dialled()
     {
         var reader = new FakeReader(FakeReader.StaysOpen);
