@@ -137,8 +137,8 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         }
 
         _logger.LogInformation(
-            "LS-NET: announcing this PC as bed \"{BedName}\" from {LocalIp}; reading {Count} monitor(s), waveforms {Waves}.",
-            _options.BedName, _self, _beds.Count, string.Join(", ", _waveCodes.Select(c => c.ToString("X4", CultureInfo.InvariantCulture))));
+            "LS-NET: announcing this PC as {Kind} \"{BedName}\" from {LocalIp}; reading {Count} monitor(s), waveforms {Waves}.",
+            _options.AnnounceAsBed ? "bed" : "node", _options.BedName, _self, _beds.Count, string.Join(", ", _waveCodes.Select(c => c.ToString("X4", CultureInfo.InvariantCulture))));
 
         _ = RunAsync(_transport, _stopping.Token);
     }
@@ -154,7 +154,7 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
 
     private async Task RunAsync(ILsNetTransport transport, CancellationToken cancellationToken)
     {
-        var beacon = LsNetProtocol.Beacon(_options.BedName, _self!);
+        var beacon = LsNetProtocol.Beacon(_options.BedName, _self!, _options.AnnounceAsBed);
         var beaconEvery = TimeSpan.FromMilliseconds(_options.BeaconIntervalMs);
         var nextBeacon = TimeSpan.Zero;
 

@@ -94,6 +94,9 @@ internal static class LsNetProtocol
     public const ushort SubscribeType = 0x0222;
     public const ushort PatientType = 0x0308;
 
+    /// <summary>Last byte of the node id of a bedside monitor.</summary>
+    private const byte BedNode = 0x20;
+
     private const int PatientIdOffset = 382;
     private const int PatientIdLength = 16;
 
@@ -116,16 +119,24 @@ internal static class LsNetProtocol
     public static byte[] NodeId(IPAddress address)
     {
         var a = address.GetAddressBytes();
-        return new byte[] { a[1], a[2], a[3], 0x20 };
+        return new byte[] { a[1], a[2], a[3], BedNode };
     }
 
     /// <summary>
-    /// The 64-byte announcement of a bed. The monitor only serves a node it hears this from:
+    /// The 64-byte announcement of a node. The monitor only serves a node it hears this from:
     /// it ignores the requests of a silent one, and stops a stream about eight seconds after
-    /// the beacons stop. The price is that the sender shows up as a bed in the monitor's
-    /// Interbed window, under <paramref name="bedName"/>.
+    /// the beacons stop.
+    /// <para>
+    /// The last byte of the node id says what the node is. A BSM-3562 sends 0x20, and a node
+    /// announcing 0x20 is a bed to it: listed in its Interbed window under
+    /// <paramref name="bedName"/> and polled about once a second for its own values - which
+    /// we do not have, so it shows as a bed whose monitor is off. With 0x00 the monitor
+    /// streams just the same and neither lists nor polls the node (two minutes watched, no
+    /// request, nothing new on its screen). What 0x00 means to Nihon Kohden is not known; 0x10
+    /// and 0x40 behaved the same in a shorter run.
+    /// </para>
     /// </summary>
-    public static byte[] Beacon(string bedName, IPAddress self)
+    public static byte[] Beacon(string bedName, IPAddress self, bool asBed = false)
     {
         var a = self.GetAddressBytes();
         var b = new byte[64];
@@ -135,7 +146,7 @@ internal static class LsNetProtocol
         b[33] = 0x01;
         Encoding.ASCII.GetBytes(bedName.Length > 11 ? bedName[..11] : bedName).CopyTo(b, 36);
         a.CopyTo(b, 48);
-        b[52] = a[1]; b[53] = a[2]; b[54] = a[3]; b[55] = 0x20;
+        b[52] = a[1]; b[53] = a[2]; b[54] = a[3]; b[55] = asBed ? BedNode : (byte)0x00;
         b[60] = 0x01; b[61] = 0x86; b[62] = 0x01;
         return b;
     }

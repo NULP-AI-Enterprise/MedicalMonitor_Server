@@ -40,10 +40,22 @@ public class NihonKohdenLsNetTests
     [Fact]
     public void Our_beacon_is_the_monitors_own_with_our_address_and_name()
     {
-        var ours = LsNetProtocol.Beacon("ICU-001", Monitor);
+        var ours = LsNetProtocol.Beacon("ICU-001", Monitor, asBed: true);
 
         Assert.Equal(Wire["beacon"], ours);
         Assert.Equal(MonitorId, LsNetProtocol.NodeId(Monitor));
+    }
+
+    [Fact]
+    public void By_default_we_announce_a_node_the_monitor_does_not_list_as_a_bed()
+    {
+        var asBed = LsNetProtocol.Beacon("STATION", Self, asBed: true);
+        var asNode = LsNetProtocol.Beacon("STATION", Self);
+
+        // One byte apart: the last of the node id, 0x20 for a bedside monitor.
+        var differing = Enumerable.Range(0, 64).Where(i => asBed[i] != asNode[i]).ToArray();
+        Assert.Equal(new[] { 55 }, differing);
+        Assert.Equal((0x20, 0x00), (asBed[55], asNode[55]));
     }
 
     [Fact]

@@ -43,9 +43,17 @@ public sealed class LsNetOptions
 
     /// <summary>
     /// The name this PC announces itself under, 11 characters at most. A monitor only talks to
-    /// a node that announces itself, and lists it as a bed in its Interbed window.
+    /// a node that announces itself. Monitors show the name only with <see cref="AnnounceAsBed"/>.
     /// </summary>
     public string BedName { get; set; } = "STATION";
+
+    /// <summary>
+    /// False (the default) announces this PC as a node the monitors stream to without listing
+    /// it. True announces it as a bedside monitor, as the first version of the driver did: the
+    /// monitors then list it in their Interbed window and keep asking it for values it does
+    /// not have. Only worth turning on if a monitor refuses the default.
+    /// </summary>
+    public bool AnnounceAsBed { get; set; }
 
     /// <summary>
     /// Waveforms to ask every monitor for, as their codes: "0100".."010B" the ECG leads I..V6,
