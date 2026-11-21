@@ -1,0 +1,2 @@
+# Raw captures of a monitor stream: MLLP framing bytes and lone CRs must survive checkout as they are.
+*.bin binary

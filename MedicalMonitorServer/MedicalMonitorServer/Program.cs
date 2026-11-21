@@ -7,6 +7,7 @@ using MedicalMonitorServer;
 using MedicalMonitorServer.Contracts.Api;
 using MedicalMonitorServer.Core.Monitoring;
 using MedicalMonitorServer.DeviceDriver;
+using MedicalMonitorServer.DeviceDriver.NihonKohden;
 using MedicalMonitorServer.Hubs;
 using MedicalMonitorServer.Security;
 using MedicalMonitorServer.Services;
@@ -54,7 +55,20 @@ builder.Services.AddSingleton(serviceProvider =>
     return options;
 });
 builder.Services.AddSingleton<IWatchDogService, WatchDogService>();
+
+// Nihon Kohden monitors in HL7 mode are listed by address ("NihonKohden:Monitors"); the watchdog
+// must not probe them. An empty list leaves the driver off.
+builder.Services.AddSingleton(serviceProvider =>
+{
+    var options = new NihonKohdenOptions();
+    serviceProvider
+        .GetRequiredService<IConfiguration>()
+        .GetSection("NihonKohden")
+        .Bind(options);
+    return options;
+});
 builder.Services.AddSingleton<DeviceService>();
+builder.Services.AddSingleton<IMonitorAdmissions>(serviceProvider => serviceProvider.GetRequiredService<DeviceService>());
 builder.Services.AddHostedService<WatchDogHostedService>();
 builder.Services.AddFastEndpoints();
 if (swaggerEnabled)

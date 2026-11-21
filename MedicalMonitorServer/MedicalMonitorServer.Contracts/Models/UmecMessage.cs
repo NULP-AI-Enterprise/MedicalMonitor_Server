@@ -119,6 +119,9 @@ public sealed class UmecVitalsMessage
     /// <summary>Waveform samples (ZMW segments of msg 157), one entry per channel block.</summary>
     public List<WaveSamples> WaveSamples { get; set; } = new();
 
+    /// <summary>Waveform samples the driver scaled itself; see <see cref="ScaledWave"/>.</summary>
+    public List<ScaledWave> ScaledWaves { get; set; } = new();
+
     public List<UmecObservation> Observations { get; set; } = new();
 }
 

@@ -139,6 +139,13 @@ public sealed class UmecFeedService : BackgroundService
         }
 
         var waveforms = ToWaveforms(monitorIp, oru.WaveSamples);
+        if (oru.ScaledWaves.Count > 0)
+        {
+            // A Nihon Kohden over LS-NET: no descriptors to scale by, the driver did it.
+            waveforms = (waveforms ?? Array.Empty<WaveformSampleDto>())
+                .Concat(oru.ScaledWaves.Select(w => new WaveformSampleDto(w.Type, w.Samples, w.SampleRate)))
+                .ToArray();
+        }
         if (!hasReadings)
         {
             // The monitor sends samples in a message of their own, without values.

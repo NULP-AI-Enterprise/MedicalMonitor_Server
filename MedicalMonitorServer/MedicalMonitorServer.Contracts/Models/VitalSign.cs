@@ -90,6 +90,22 @@ public sealed class WaveChannel
 /// channels the start query lists. The values are raw: what one of them means —
 /// zero line, scale, range, sample rate — is in the channel's <see cref="WaveChannel"/>.
 /// </summary>
+/// <summary>
+/// A run of samples of one trace that the driver has already put into the units stations draw
+/// (see <see cref="Api.WaveformSampleDto"/>): millivolts for an ECG, -0.5 .. 0.5 for the rest.
+/// For monitors that send no channel descriptor to scale raw samples by, so the driver that
+/// knows the wire format has to do it - a Nihon Kohden over LS-NET.
+/// </summary>
+public sealed class ScaledWave
+{
+    public Api.WaveformType Type { get; set; }
+
+    public float[] Samples { get; set; } = Array.Empty<float>();
+
+    /// <summary>Samples per second.</summary>
+    public int SampleRate { get; set; }
+}
+
 public sealed class WaveSamples
 {
     /// <summary>Channel the samples belong to, e.g. 1101 = ECG 1.</summary>
