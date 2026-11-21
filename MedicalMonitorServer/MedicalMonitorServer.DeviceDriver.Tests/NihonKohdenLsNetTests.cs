@@ -203,6 +203,9 @@ public class NihonKohdenLsNetTests
 
         // Nothing else alarms with it.
         Assert.Single(Parsed("alarm-crisis-spo2").Numerics!, n => n.Alarm != LsNetAlarm.None);
+
+        // The third priority, raised on the skin temperature.
+        Assert.Equal(LsNetAlarm.Advisory, Record("alarm-advisory-temp", 0x0B00).Alarm);
     }
 
     [Fact]
@@ -374,6 +377,26 @@ public class NihonKohdenLsNetTests
         await Wait.UntilAsync(() => Alarms(messages).Count == 2, "the changed list is passed on");
         alarm = Assert.Single(Alarms(messages)[1].Oru!.Alarms);
         Assert.Equal((0x0700, "SpO2 limit alarm", AlarmLevel.High), (alarm.AlarmId, alarm.Text, alarm.Level));
+    }
+
+    [Fact]
+    public async Task The_three_priorities_of_the_monitor_become_high_medium_and_low()
+    {
+        var transport = new FakeTransport();
+        using var provider = Provider(transport);
+        var messages = Collect(provider);
+        provider.Start();
+
+        transport.Deliver("alarm-crisis-spo2");
+        await Wait.UntilAsync(() => Alarms(messages).Count == 1, "the crisis alarm is passed on");
+        transport.Deliver("alarm-warning-spo2");
+        await Wait.UntilAsync(() => Alarms(messages).Count == 2, "the warning alarm is passed on");
+        transport.Deliver("alarm-advisory-temp");
+        await Wait.UntilAsync(() => Alarms(messages).Count == 3, "the advisory alarm is passed on");
+
+        Assert.Equal(
+            new[] { ("SpO2 limit alarm", AlarmLevel.High), ("SpO2 limit alarm", AlarmLevel.Medium), ("Skin temperature limit alarm", AlarmLevel.Low) },
+            Alarms(messages).Select(m => m.Oru!.Alarms.Single()).Select(a => (a.Text, a.Level)));
     }
 
     [Fact]

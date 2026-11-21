@@ -365,7 +365,8 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
                 {
                     LsNetAlarm.Crisis => AlarmLevel.High,
                     LsNetAlarm.Warning => AlarmLevel.Medium,
-                    _ => AlarmLevel.Unknown,        // the advisory level, or a value not seen yet
+                    LsNetAlarm.Advisory => AlarmLevel.Low,
+                    _ => AlarmLevel.Unknown,        // not one of the monitor's three levels
                 },
                 RaisedAt = DateTime.Now,
             });

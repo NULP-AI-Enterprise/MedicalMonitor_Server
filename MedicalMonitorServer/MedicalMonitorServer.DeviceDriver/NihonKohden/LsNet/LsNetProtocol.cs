@@ -41,13 +41,15 @@ internal readonly record struct LsNetNumeric(ushort Code, int? Value, byte Alarm
 /// <summary>
 /// Values of the alarm byte of a numeric record. Read off a BSM-3562 while its limits were moved
 /// to raise alarms: the same alarm went from <see cref="Warning"/> to <see cref="Crisis"/> the
-/// moment its priority was changed on the monitor from the yellow level to the red one. The
-/// monitor has a third, lowest level (advisory) that was not raised; its value is not known.
+/// moment its priority was changed on the monitor from the yellow level to the red one, and a
+/// temperature alarm set to the blue level came as <see cref="Advisory"/>. These are the
+/// monitor's three priorities.
 /// </summary>
 internal static class LsNetAlarm
 {
     public const byte Crisis = 0x00;
     public const byte Warning = 0x10;
+    public const byte Advisory = 0x20;
     public const byte None = 0x40;
 }
 
