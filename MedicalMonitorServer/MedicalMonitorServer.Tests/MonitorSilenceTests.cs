@@ -195,10 +195,10 @@ public class MonitorSilenceTests
     }
 
     [Fact]
-    public async Task A_patient_the_returning_monitor_no_longer_names_does_not_keep_the_alert_for_good()
+    public async Task A_patient_the_returning_monitor_no_longer_names_leaves_with_their_alert()
     {
-        // The monitor went silent with P-1 on it and came back admitted to P-2. P-1
-        // is bound to nothing now, so only a pass over the alerts can find theirs.
+        // The monitor went silent with P-1 on it and came back admitted to P-2: P-1 was
+        // discharged on it, and their alert must not outlive them.
         await MessageAsync(patientId: "P-1");
         await SweepAsync(TimeSpan.FromSeconds(31));
         Assert.NotNull(SilenceAlert("P-1"));
@@ -209,7 +209,7 @@ public class MonitorSilenceTests
 
         Assert.Null(SilenceAlert("P-1"));
         Assert.Null(SilenceAlert("P-2"));
-        Assert.NotNull(_patients.Get("P-1"));           // still on the roster, just unmonitored
+        Assert.Null(_patients.Get("P-1"));              // discharged on the monitor
     }
 
     [Fact]

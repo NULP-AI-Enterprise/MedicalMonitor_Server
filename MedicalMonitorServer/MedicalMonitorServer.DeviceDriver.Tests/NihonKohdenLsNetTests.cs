@@ -306,7 +306,10 @@ public class NihonKohdenLsNetTests
 
         var request = transport.Sent.First(s => s.Data[12] == 0x02 && s.Data[13] == 0x22);
         Assert.Equal(Monitor, request.To);
-        Assert.Equal(LsNetProtocol.Subscribe(1, MonitorId, Self, new ushort[] { 0x0101, 0x0700 }).AsSpan(4).ToArray(), request.Data.AsSpan(4).ToArray());
+        // ECG II, arterial pressure, pleth, central venous pressure, respiration: all a station draws.
+        Assert.Equal(
+            LsNetProtocol.Subscribe(1, MonitorId, Self, new ushort[] { 0x0101, 0x2C00, 0x0700, 0x3500, 0x0500 }).AsSpan(4).ToArray(),
+            request.Data.AsSpan(4).ToArray());
         Assert.DoesNotContain(transport.Sent, s => s.To.ToString() == "10.10.46.49");   // that one is on HL7
     }
 
@@ -336,7 +339,14 @@ public class NihonKohdenLsNetTests
         Assert.Equal(80, vitals[161]);              // PR
         Assert.Equal(36.5, vitals[200]);            // first temperature
         Assert.Equal(37.0, vitals[201]);            // second temperature
-        Assert.DoesNotContain(message.Oru.Vitals, v => v.Label == "044000");    // ART has no place on a station
+        Assert.Equal(118, vitals[ServerParameterIds.ArtSystolic]);      // the arterial line
+        Assert.Equal(76, vitals[ServerParameterIds.ArtDiastolic]);
+        Assert.Equal(91, vitals[ServerParameterIds.ArtMean]);
+        Assert.Equal(8, vitals[ServerParameterIds.CvpMean]);            // central venous pressure
+        Assert.Equal(0.08, vitals[ServerParameterIds.StV1]);            // ST of chest lead V1
+        Assert.Equal(2.78, vitals[162]);            // perfusion index: 278 on the wire
+        Assert.Null(vitals[151]);                   // respiration is switched off: listed once, without a value
+        Assert.DoesNotContain(message.Oru.Vitals, v => v.Label == "072044");    // a second pulse rate nobody reads
 
         Assert.Equal(("ICU-001", "1", "10.10.46.48"),
             (message.Oru.Patient!.BedLabel, message.Oru.Patient.BedNumber, message.Oru.Patient.MonitorIp));
@@ -361,13 +371,19 @@ public class NihonKohdenLsNetTests
         Assert.False(message.Oru.VitalsAreComplete);       // samples alone say nothing about the values
         Assert.Null(message.Oru.Patient);
 
-        // ECG II and pleth; the arterial pressure trace has no lane on a station.
-        Assert.Equal(new[] { WaveformType.ECG_II, WaveformType.Pleth }, message.Oru.ScaledWaves.Select(w => w.Type));
+        // ECG II, pleth and the arterial pressure trace, in the order the monitor sends them.
+        Assert.Equal(
+            new[] { WaveformType.ECG_II, WaveformType.Pleth, WaveformType.ArterialPressure },
+            message.Oru.ScaledWaves.Select(w => w.Type));
         Assert.All(message.Oru.ScaledWaves, w => Assert.Equal((125, 32), (w.SampleRate, w.Samples.Length)));
 
         var raw = Parsed("wave3-1").Waves;
         Assert.Equal((float)Math.Round(raw[0].Samples[5] / 400.0, 4), message.Oru.ScaledWaves[0].Samples[5]);
         Assert.All(message.Oru.ScaledWaves[1].Samples, s => Assert.InRange(s, -0.5f, 0.5f));
+
+        // A pressure arrives in mmHg, an eighth of a mmHg a count: the monitor read 118/76 then.
+        Assert.Equal((float)Math.Round(raw[2].Samples[5] / 8.0, 4), message.Oru.ScaledWaves[2].Samples[5]);
+        Assert.All(message.Oru.ScaledWaves[2].Samples, s => Assert.InRange(s, 70f, 125f));
     }
 
     /// <summary>The reports with values in them; each also brings a list of alarms, a message of its own.</summary>
@@ -394,14 +410,14 @@ public class NihonKohdenLsNetTests
 
         // 044006 and its twin 072044 alarm together; the station gets one alert.
         var alarm = Assert.Single(Alarms(messages)[0].Oru!.Alarms);
-        Assert.Equal((0x2C06, "PR (ART) limit alarm", AlarmLevel.Medium, AlarmCategory.Physiological),
+        Assert.Equal((0x2C06, "PR (ART) out of limits", AlarmLevel.Medium, AlarmCategory.Physiological),
             (alarm.AlarmId, alarm.Text, alarm.Level, alarm.Category));
         Assert.Equal("10.10.46.48", Alarms(messages)[0].SourceIp);
 
         transport.Deliver("alarm-crisis-spo2");
         await Wait.UntilAsync(() => Alarms(messages).Count == 2, "the changed list is passed on");
         alarm = Assert.Single(Alarms(messages)[1].Oru!.Alarms);
-        Assert.Equal((0x0700, "SpO2 limit alarm", AlarmLevel.High), (alarm.AlarmId, alarm.Text, alarm.Level));
+        Assert.Equal((0x0700, "SpO2 out of limits", AlarmLevel.High), (alarm.AlarmId, alarm.Text, alarm.Level));
     }
 
     [Fact]
@@ -420,7 +436,7 @@ public class NihonKohdenLsNetTests
         await Wait.UntilAsync(() => Alarms(messages).Count == 3, "the advisory alarm is passed on");
 
         Assert.Equal(
-            new[] { ("SpO2 limit alarm", AlarmLevel.High), ("SpO2 limit alarm", AlarmLevel.Medium), ("Skin temperature limit alarm", AlarmLevel.Low) },
+            new[] { ("SpO2 out of limits", AlarmLevel.High), ("SpO2 out of limits", AlarmLevel.Medium), ("Skin temperature out of limits", AlarmLevel.Low) },
             Alarms(messages).Select(m => m.Oru!.Alarms.Single()).Select(a => (a.Text, a.Level)));
     }
 

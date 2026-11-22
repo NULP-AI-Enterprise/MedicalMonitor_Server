@@ -39,6 +39,20 @@ public static class VitalThresholds
 /// Latest known readings of a patient. A null value means "not measured (yet)" and is
 /// never evaluated, so a missing sensor cannot raise a false critical alert.
 /// </summary>
+/// <param name="Parameters">
+/// The monitor's other values by <see cref="ParameterDto.Code"/> (see <see cref="MonitorParameters"/>);
+/// null when there are none, never empty, so that readings with nothing in them compare equal.
+/// </param>
+/// <param name="WithdrawnParameters">
+/// In an update only: codes of values the monitor has just reported as no longer measured,
+/// which <see cref="Merge"/> takes off the snapshot. Never set on a stored snapshot.
+/// </param>
+/// <param name="NibpMeasuredAt">When the cuff reading was taken; null when the monitor did not say.</param>
+/// <param name="CuffWithdrawn">
+/// In an update only: the monitor lists its cuff pressure without a value - a measurement
+/// failed, or the patient changed - so the reading it had no longer stands. That is not the
+/// same as a report that does not mention the cuff, which leaves the last reading in place.
+/// </param>
 public sealed record VitalReadings(
     int? HeartRate = null,
     int? SpO2 = null,
@@ -47,7 +61,11 @@ public sealed record VitalReadings(
     int? MeanArterialPressure = null,
     int? RespiratoryRate = null,
     double? Temperature = null,
-    int? PulseRate = null)
+    int? PulseRate = null,
+    IReadOnlyDictionary<string, ParameterDto>? Parameters = null,
+    IReadOnlyCollection<string>? WithdrawnParameters = null,
+    DateTimeOffset? NibpMeasuredAt = null,
+    bool CuffWithdrawn = false)
 {
     /// <summary>
     /// Builds readings from a wire DTO. Both null and 0 mean "not measured" (0 is kept for
@@ -61,36 +79,77 @@ public sealed record VitalReadings(
         Measured(vitals.Nibp?.MeanArterialPressure),
         Measured(vitals.RespiratoryRate),
         vitals.Temperature > 0 ? vitals.Temperature : null,
-        Measured(vitals.PulseRate));
+        Measured(vitals.PulseRate),
+        vitals.Parameters is { Count: > 0 } parameters
+            ? parameters.GroupBy(p => p.Code).ToDictionary(g => g.Key, g => g.Last())
+            : null,
+        NibpMeasuredAt: vitals.Nibp?.MeasuredAt);
 
     private static int? Measured(int? value) => value > 0 ? value : null;
 
-    /// <summary>Overlays the values present in <paramref name="update"/> on top of this snapshot.</summary>
+    /// <summary>
+    /// True when a value was measured. Readings that only withdraw values carry no measurement:
+    /// they change what a station shows, but they are not data arriving.
+    /// </summary>
+    public bool HasValues =>
+        HeartRate is not null || SpO2 is not null || Systolic is not null || Diastolic is not null
+        || MeanArterialPressure is not null || RespiratoryRate is not null || Temperature is not null
+        || PulseRate is not null || Parameters is not null;
+
+    private bool HasCuffReading => Systolic is not null || Diastolic is not null || MeanArterialPressure is not null;
+
+    /// <summary>
+    /// Overlays the values present in <paramref name="update"/> on top of this snapshot, and
+    /// takes off the parameters it withdraws.
+    /// </summary>
     public VitalReadings Merge(VitalReadings update) => new(
         update.HeartRate ?? HeartRate,
         update.SpO2 ?? SpO2,
-        update.Systolic ?? Systolic,
-        update.Diastolic ?? Diastolic,
-        update.MeanArterialPressure ?? MeanArterialPressure,
+        update.Systolic ?? (update.CuffWithdrawn ? null : Systolic),
+        update.Diastolic ?? (update.CuffWithdrawn ? null : Diastolic),
+        update.MeanArterialPressure ?? (update.CuffWithdrawn ? null : MeanArterialPressure),
         update.RespiratoryRate ?? RespiratoryRate,
         update.Temperature ?? Temperature,
-        update.PulseRate ?? PulseRate);
+        update.PulseRate ?? PulseRate,
+        MergeParameters(Parameters, update.Parameters, update.WithdrawnParameters),
+        // The time belongs to the reading: a new reading without one must not keep the old time.
+        NibpMeasuredAt: update.HasCuffReading ? update.NibpMeasuredAt : update.CuffWithdrawn ? null : NibpMeasuredAt);
 
     /// <summary>
     /// Takes <paramref name="snapshot"/> as everything the monitor measures right now: a running
     /// value it does not carry is dropped, not kept from before. Blood pressure is the exception -
-    /// a cuff reading is taken now and then and stands until the next one, so it is only ever
-    /// replaced by a new reading.
+    /// a cuff reading is taken now and then and stands until the next one, so a report that does
+    /// not mention it leaves it alone. Only a new reading replaces it, and only the monitor
+    /// withdrawing it (<see cref="CuffWithdrawn"/>) takes it off.
     /// </summary>
     public VitalReadings ReplaceRunning(VitalReadings snapshot) => new(
         snapshot.HeartRate,
         snapshot.SpO2,
-        snapshot.Systolic ?? Systolic,
-        snapshot.Diastolic ?? Diastolic,
-        snapshot.MeanArterialPressure ?? MeanArterialPressure,
+        snapshot.Systolic ?? (snapshot.CuffWithdrawn ? null : Systolic),
+        snapshot.Diastolic ?? (snapshot.CuffWithdrawn ? null : Diastolic),
+        snapshot.MeanArterialPressure ?? (snapshot.CuffWithdrawn ? null : MeanArterialPressure),
         snapshot.RespiratoryRate,
         snapshot.Temperature,
-        snapshot.PulseRate);
+        snapshot.PulseRate,
+        snapshot.Parameters,
+        NibpMeasuredAt: snapshot.HasCuffReading ? snapshot.NibpMeasuredAt : snapshot.CuffWithdrawn ? null : NibpMeasuredAt);
+
+    private static IReadOnlyDictionary<string, ParameterDto>? MergeParameters(
+        IReadOnlyDictionary<string, ParameterDto>? current,
+        IReadOnlyDictionary<string, ParameterDto>? update,
+        IReadOnlyCollection<string>? withdrawn)
+    {
+        if (update is null && withdrawn is null) return current;
+
+        var merged = current is null
+            ? new Dictionary<string, ParameterDto>(StringComparer.Ordinal)
+            : new Dictionary<string, ParameterDto>(current, StringComparer.Ordinal);
+
+        foreach (var code in withdrawn ?? Array.Empty<string>()) merged.Remove(code);
+        foreach (var (code, parameter) in update ?? new Dictionary<string, ParameterDto>()) merged[code] = parameter;
+
+        return merged.Count > 0 ? merged : null;
+    }
 
     /// <summary>Wire form: missing values stay null. Nibp is always an object, its fields may be null.</summary>
     public VitalsDto ToDto()
@@ -101,10 +160,12 @@ public sealed record VitalReadings(
         return new VitalsDto(
             HeartRate,
             SpO2,
-            new BloodPressureDto(Systolic, Diastolic, map),
+            new BloodPressureDto(Systolic, Diastolic, map, HasCuffReading ? NibpMeasuredAt : null),
             RespiratoryRate,
             Temperature,
-            PulseRate);
+            PulseRate,
+            // In a fixed order, so a station's list does not reshuffle from one frame to the next.
+            Parameters?.Values.OrderBy(p => p.Code, StringComparer.Ordinal).ToArray());
     }
 }
 

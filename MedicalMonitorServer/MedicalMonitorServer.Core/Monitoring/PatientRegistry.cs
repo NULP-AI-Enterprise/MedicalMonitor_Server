@@ -84,11 +84,13 @@ public sealed class PatientRegistry : IPatientRegistry
         _channels.TryRemove(patientId, out _);
     }
 
+    // A first update goes through the same merge as a later one: what is stored is always a
+    // snapshot, never an update with its list of withdrawn parameters still on it.
     public VitalReadings MergeReadings(string patientId, VitalReadings update) =>
-        _readings.AddOrUpdate(patientId, _ => update, (_, existing) => existing.Merge(update));
+        _readings.AddOrUpdate(patientId, _ => new VitalReadings().Merge(update), (_, existing) => existing.Merge(update));
 
     public VitalReadings ReplaceReadings(string patientId, VitalReadings snapshot) =>
-        _readings.AddOrUpdate(patientId, _ => snapshot, (_, existing) => existing.ReplaceRunning(snapshot));
+        _readings.AddOrUpdate(patientId, _ => new VitalReadings().ReplaceRunning(snapshot), (_, existing) => existing.ReplaceRunning(snapshot));
 
     public WaveformChannelDto[] GetWaveformChannels(string patientId) =>
         _channels.TryGetValue(patientId, out var channels) ? channels : Array.Empty<WaveformChannelDto>();

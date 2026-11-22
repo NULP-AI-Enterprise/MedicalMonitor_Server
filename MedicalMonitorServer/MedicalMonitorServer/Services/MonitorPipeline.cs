@@ -86,14 +86,17 @@ public sealed class MonitorPipeline : IMonitorPipeline
     private readonly IMonitorBindings _bindings;
     private readonly FeedStatus _feed;
     private readonly ILogger<MonitorPipeline> _logger;
+    private readonly IPatientRecordStore _records;
 
+    /// <param name="records">Where patient records outlive a restart; nothing is kept when omitted.</param>
     public MonitorPipeline(
         IHubContext<VitalsHub> hub,
         IPatientRegistry patients,
         IAlertStateService alerts,
         IMonitorBindings bindings,
         FeedStatus feed,
-        ILogger<MonitorPipeline> logger)
+        ILogger<MonitorPipeline> logger,
+        IPatientRecordStore? records = null)
     {
         _hub = hub;
         _patients = patients;
@@ -101,12 +104,15 @@ public sealed class MonitorPipeline : IMonitorPipeline
         _bindings = bindings;
         _feed = feed;
         _logger = logger;
+        _records = records ?? new NoPatientRecordStore();
     }
 
     public async Task UpsertPatientAsync(PatientInfoDto patient, CancellationToken ct = default)
     {
         if (_patients.Upsert(patient))
         {
+            _records.Save(patient);
+
             // PatientAdded doubles as "patient updated": the UI treats it as an upsert by patientId.
             await _hub.Clients.All.SendAsync(HubMethods.PatientAdded, patient, ct);
         }
@@ -116,6 +122,7 @@ public sealed class MonitorPipeline : IMonitorPipeline
     {
         if (!_patients.Remove(patientId)) return false;
 
+        _records.Remove(patientId);
         _bindings.Forget(patientId);
 
         foreach (var cleared in _alerts.ClearForPatient(patientId))
@@ -142,13 +149,16 @@ public sealed class MonitorPipeline : IMonitorPipeline
 
     public async Task IngestTelemetryAsync(MonitorUpdateDto update, CancellationToken ct = default)
     {
+        // A gateway knows the name and the bed; the diagnosis and the type are what a station
+        // recorded, on the roster now or kept from before a restart.
+        var known = _patients.Get(update.PatientId) ?? _records.Get(update.PatientId);
         await UpsertPatientAsync(
             new PatientInfoDto(
                 update.PatientId,
                 update.PatientName,
                 update.BedNumber,
-                _patients.Get(update.PatientId)?.Diagnosis,
-                _patients.Get(update.PatientId)?.PatientType ?? "Adu"),
+                known?.Diagnosis,
+                known?.PatientType ?? "Adu"),
             ct);
 
         if (update.WaveformChannels is { Length: > 0 } channels)

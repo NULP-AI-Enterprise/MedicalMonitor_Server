@@ -133,8 +133,10 @@ public sealed class UmecFeedService : BackgroundService
             }
         }
 
-        var readings = oru is { Vitals.Count: > 0 } ? ToReadings(oru.Vitals) : new VitalReadings();
-        var hasReadings = readings != new VitalReadings();
+        var readings = oru is { Vitals.Count: > 0 } ? ToReadings(oru.Vitals, oru.VitalsAreComplete) : new VitalReadings();
+
+        // Measured values only: a message that just says "no longer measured" is not data arriving.
+        var hasReadings = readings.HasValues;
 
         // Most messages carry no PID at all (the monitor sends it only in its patient-info
         // message), so the owner comes from the monitor the message was read from.
@@ -189,6 +191,13 @@ public sealed class UmecFeedService : BackgroundService
         // A complete report with no value in it is news too: every sensor is off.
         if (!hasReadings && !oru.VitalsAreComplete)
         {
+            // Parameters the monitor has stopped measuring leave the snapshot now and reach the
+            // stations with the next frame: no frame of its own, and the feed is no fresher for it.
+            if (readings.WithdrawnParameters is not null)
+            {
+                _patients.MergeReadings(patientId, readings);
+            }
+
             // The monitor sends samples in a message of their own, without values.
             if (waveforms is not null)
             {
@@ -280,13 +289,43 @@ public sealed class UmecFeedService : BackgroundService
             Category: category);
     }
 
-    /// <summary>Maps Mindray parameter ids to the vitals the UI shows.</summary>
-    private static VitalReadings ToReadings(IEnumerable<VitalSign> vitals)
+    /// <summary>
+    /// Maps Mindray parameter ids to the six vitals every station shows; every other value
+    /// becomes a parameter (see <see cref="MonitorParameters"/>), and one the monitor lists
+    /// without a number is withdrawn.
+    /// </summary>
+    /// <param name="complete">
+    /// The values are the monitor's whole list (see <see cref="UmecVitalsMessage.VitalsAreComplete"/>).
+    /// Only then does a cuff pressure listed without a number mean the reading is gone: seen on
+    /// a Nihon Kohden when a measurement failed. What a uMec means by it has not been watched,
+    /// so there the last reading stays, as it always did.
+    /// </param>
+    private static VitalReadings ToReadings(IEnumerable<VitalSign> vitals, bool complete)
     {
         var readings = new VitalReadings();
+        Dictionary<string, ParameterDto>? parameters = null;
+        List<string>? withdrawn = null;
+        bool cuffListedEmpty = false;
 
         foreach (var vital in vitals)
         {
+            // The cuff pressure listed without a number: the monitor has no reading any more.
+            if (vital.ParameterId is 170 or 171 or 172 && vital.Value is null) cuffListedEmpty = true;
+
+            if (MonitorParameters.CodeOf(vital.ParameterId) is { } code)
+            {
+                if (MonitorParameters.Describe(vital) is { } parameter)
+                {
+                    (parameters ??= new(StringComparer.Ordinal))[code] = parameter;
+                }
+                else if (vital.Value is null)
+                {
+                    (withdrawn ??= new()).Add(code);
+                }
+
+                continue;
+            }
+
             if (vital.Value is not double value) continue;
 
             var whole = (int)Math.Round(value);
@@ -302,8 +341,22 @@ public sealed class UmecFeedService : BackgroundService
                 200 => readings with { Temperature = Math.Round(value, 1) },
                 _ => readings,
             };
+
+            // A cuff reading comes with the time it was taken, on the monitor's clock.
+            if (vital.ParameterId is 170 or 171 or 172 && vital.MeasuredAt is { } taken)
+            {
+                readings = readings with { NibpMeasuredAt = new DateTimeOffset(DateTime.SpecifyKind(taken, DateTimeKind.Local)) };
+            }
         }
 
-        return readings;
+        // A message that carries any cuff value is a reading, however incomplete, not a withdrawal.
+        bool hasCuffValue = readings.Systolic is not null || readings.Diastolic is not null || readings.MeanArterialPressure is not null;
+
+        return readings with
+        {
+            Parameters = parameters,
+            WithdrawnParameters = withdrawn,
+            CuffWithdrawn = complete && cuffListedEmpty && !hasCuffValue,
+        };
     }
 }

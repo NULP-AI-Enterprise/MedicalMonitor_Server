@@ -83,15 +83,28 @@ public class NihonKohdenTests
     }
 
     [Fact]
+    public void Invasive_pressures_reach_the_feed_under_the_servers_own_ids()
+    {
+        var vitals = VitalsOf(Load("nihon_kohden_bsm3562_simulation.bin")[0]);
+
+        // 044000-044002 the arterial line, 053000-053002 the central venous pressure.
+        Assert.Equal(118, vitals[ServerParameterIds.ArtSystolic].Value);
+        Assert.Equal(76, vitals[ServerParameterIds.ArtDiastolic].Value);
+        Assert.Equal(91, vitals[ServerParameterIds.ArtMean].Value);
+        Assert.Equal(8, vitals[ServerParameterIds.CvpMean].Value);
+        Assert.Equal("mmHg", vitals[ServerParameterIds.ArtSystolic].Unit);
+    }
+
+    [Fact]
     public void Measurements_without_a_counterpart_stay_observations_only()
     {
         var oru = Load("nihon_kohden_bsm3562_simulation.bin")[0].Oru!;
 
-        // 26 VITAL + 3 NIBP on the wire; invasive pressures and chest-lead ST are not vitals.
+        // 26 VITAL + 3 NIBP on the wire; the second pulse rate of the arterial line is read by nobody.
         Assert.Equal(29, oru.Observations.Count);
-        Assert.Equal(16, oru.Vitals.Count);
-        Assert.Contains(oru.Observations, o => o.Code == "044000" && o.Value == "118");
-        Assert.DoesNotContain(oru.Vitals, v => v.Label.Contains("ART(S)"));
+        Assert.Equal(28, oru.Vitals.Count);
+        Assert.Contains(oru.Observations, o => o.Code == "072044");
+        Assert.DoesNotContain(oru.Vitals, v => v.Label.Contains("rPR"));
     }
 
     [Fact]
