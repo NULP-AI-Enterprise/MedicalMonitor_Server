@@ -2,6 +2,7 @@ using System.Net;
 using FastEndpoints;
 using MedicalMonitorServer.Contracts.Api;
 using MedicalMonitorServer.Core.Monitoring;
+using MedicalMonitorServer.DeviceDriver;
 using MedicalMonitorServer.Services;
 
 namespace MedicalMonitorServer.Endpoints;
@@ -18,18 +19,27 @@ public sealed class TransferPatientRequest
 public sealed class GetMonitorsEndpoint : EndpointWithoutRequest<List<MonitorBindingDto>>
 {
     private readonly IMonitorBindings _bindings;
+    private readonly DeviceService _devices;
 
-    public GetMonitorsEndpoint(IMonitorBindings bindings) => _bindings = bindings;
+    public GetMonitorsEndpoint(IMonitorBindings bindings, DeviceService devices)
+    {
+        _bindings = bindings;
+        _devices = devices;
+    }
 
     public override void Configure()
     {
         Get("/api/v1/monitors");
         AllowAnonymous();
-        Summary(s => s.Summary = "Monitors that have sent data and the patient each one feeds");
+        Summary(s => s.Summary = "Monitors that have sent data, what each one is and the patient it feeds");
     }
 
+    // The bindings know a monitor by its address only; what kind of device answers there is
+    // the drivers' knowledge, added here.
     public override Task HandleAsync(CancellationToken ct) =>
-        Send.OkAsync(_bindings.GetAll().ToList(), ct);
+        Send.OkAsync(
+            _bindings.GetAll().Select(b => b with { Model = _devices.DescribeMonitor(b.MonitorIp) }).ToList(),
+            ct);
 }
 
 public sealed class TransferPatientEndpoint : Endpoint<TransferPatientRequest, TransferResultDto>

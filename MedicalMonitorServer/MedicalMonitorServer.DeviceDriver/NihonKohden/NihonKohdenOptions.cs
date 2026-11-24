@@ -57,7 +57,9 @@ public sealed class LsNetOptions
 
     /// <summary>
     /// Waveforms to ask every monitor for, as their codes: "0100".."010B" the ECG leads I..V6,
-    /// "0700" pleth. Empty asks for ECG II and pleth. One the monitor cannot give is left out.
+    /// "0500" respiration, "0700" pleth, "2C00" arterial pressure, "3500" central venous
+    /// pressure. Empty asks for ECG II and the other four. One the monitor cannot give at the
+    /// moment (no arterial line, respiration switched off) is left out of its stream.
     /// </summary>
     public List<string> Waveforms { get; set; } = new();
 

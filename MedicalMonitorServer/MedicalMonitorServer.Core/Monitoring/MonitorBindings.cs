@@ -20,7 +20,11 @@ public static class AnonymousPatient
 /// <param name="PatientId">Patient now bound to the monitor; null when the monitor was left without one.</param>
 /// <param name="CreatedAnonymous"><paramref name="PatientId"/> is a new anonymous entry that still has to be added to the roster.</param>
 /// <param name="SupersededPatientId">Anonymous entry that stood in for this monitor's patient and should be removed.</param>
-/// <param name="UnboundPatientId">Identified patient that lost this monitor. Stays on the roster.</param>
+/// <param name="UnboundPatientId">
+/// Identified patient that lost this monitor. What becomes of them is the caller's to decide:
+/// one the monitor itself dropped was discharged on it, one displaced by an operator's
+/// transfer is still in the unit.
+/// </param>
 /// <param name="PreviousMonitorIp">Monitor <paramref name="PatientId"/> was bound to before.</param>
 /// <param name="BedNumber">Bed of the monitor; 0 when it has not reported one.</param>
 public sealed record BindingChange(

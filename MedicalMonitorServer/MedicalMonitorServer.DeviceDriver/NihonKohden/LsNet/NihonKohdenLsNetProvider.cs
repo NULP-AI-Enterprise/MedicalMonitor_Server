@@ -34,6 +34,15 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
 
     // Ids of the technical alarms on the station, clear of the parameter codes the limit alarms use.
     private const int TechnicalAlarmBase = 0x10000;
+
+    private const double PressureCountsPerMmHg = 8;
+
+    // A respiration trace has no unit; it is put within -0.5 .. 0.5. The monitor's own
+    // simulation ran from -34 to 967 (2026-11-22): 4096 leaves that twice the room before a
+    // sample is clipped. What a real chest gives has not been seen.
+    private const double RespirationCountsFullScale = 4096;
+
+    private static readonly TimeSpan WaveRangeEvery = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan Tick = TimeSpan.FromMilliseconds(100);
 
     private readonly CancellationTokenSource _stopping = new();
@@ -69,6 +78,12 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         public TimeSpan LastAlarms = TimeSpan.MinValue;
         public string TechnicalSignature = "";
         public TimeSpan LastTechnical = TimeSpan.MinValue;
+        public string ParameterSignature = "";
+        public string OfferedSignature = "";
+        public Dictionary<ushort, LsNetNumeric> LastNumerics = new();
+        public CuffClock Cuff = new();
+        public Dictionary<ushort, (short Min, short Max)> WaveRanges = new();
+        public TimeSpan LastWaveRanges = TimeSpan.MinValue;
     }
 
     /// <param name="monitors">The monitors to read; those not set to LS-NET are ignored.</param>
@@ -299,6 +314,7 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         }
 
         var oru = new UmecVitalsMessage();
+        LogWaveRanges(bed, datagram.Waves);
 
         foreach (var wave in datagram.Waves)
         {
@@ -315,7 +331,9 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
 
         if (datagram.Numerics is { } numerics)
         {
-            AddVitals(oru, numerics);
+            AddVitals(oru, numerics, CuffTakenAt(bed, numerics));
+            LogParameters(bed, numerics);
+            LogChanges(bed, datagram);
 
             // The block is the monitor's whole list: a sensor that came off is either gone from
             // it or there without a value, and the station must stop showing its last number.
@@ -367,18 +385,24 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
                 TechnicalAlarmBase + datagram.TechnicalCode,
                 datagram.TechnicalCode == LsNetState.CheckElectrodes
                     ? "Check electrodes"
-                    : $"Monitor technical alarm {datagram.TechnicalCode:X2}",
+                    : $"Monitor technical alarm ({datagram.TechnicalCode:X2})",
                 datagram.TechnicalState));
         }
 
+        // A sensor that is off sets the same alarm on every parameter it feeds - an arterial
+        // line on its systolic, diastolic and mean. It is one alarm about the sensor, and is
+        // passed on once, under the first of those parameters.
+        var raised = new HashSet<(string Sensor, byte State, byte Message)>();
         foreach (var numeric in datagram.Numerics!)
         {
             if (LsNetState.LevelOf(numeric.State) == LsNetAlarm.None || numeric.Code == DuplicatePulseRate) continue;
 
-            var code = NihonKohdenCodes.FromBytes((byte)(numeric.Code >> 8), (byte)numeric.Code);
+            var sensor = NihonKohdenCodes.Sensor(NihonKohdenCodes.FromBytes((byte)(numeric.Code >> 8), (byte)numeric.Code));
+            if (!raised.Add((sensor, numeric.State, numeric.StateCode))) continue;
+
             oru.Alarms.Add(TechnicalAlarm(
                 2 * TechnicalAlarmBase + numeric.Code,
-                $"{NihonKohdenCodes.Label(code)} technical alarm {numeric.StateCode:X2}",
+                NihonKohdenCodes.TechnicalAlarmText(sensor, numeric.StateCode),
                 numeric.State));
         }
 
@@ -441,7 +465,8 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
                 Category = AlarmCategory.Physiological,
                 TypeCode = 1,
                 AlarmId = numeric.Code,
-                Text = $"{NihonKohdenCodes.Label(code)} limit alarm",
+                // The monitor says the value has crossed one of its limits, not which one.
+                Text = $"{NihonKohdenCodes.Label(code)} out of limits",
                 LevelCode = numeric.Alarm,
                 Level = LevelOf(numeric.Alarm),
                 RaisedAt = DateTime.Now,
@@ -480,11 +505,19 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
     {
         WaveformType type;
         double step;
+        bool unitless = false;
         switch (wave.Code)
         {
             case 0x0100: type = WaveformType.ECG_I; step = 1 / _options.EcgCountsPerMillivolt; break;
             case 0x0101: type = WaveformType.ECG_II; step = 1 / _options.EcgCountsPerMillivolt; break;
-            case 0x0700: type = WaveformType.Pleth; step = 1 / 8192.0; break;
+            case 0x0700: type = WaveformType.Pleth; step = 1 / 8192.0; unitless = true; break;
+            case 0x0500: type = WaveformType.Respiration; step = 1 / RespirationCountsFullScale; unitless = true; break;
+
+            // A pressure sample is an eighth of a mmHg: while the monitor read ART 118/76 with a
+            // mean of 91 its trace ran from 606 to 942 around 730 (capture 04 of 2026-11-21).
+            // The venous trace is taken to be on the same scale, see the check in LogWaveRanges.
+            case 0x2C00: type = WaveformType.ArterialPressure; step = 1 / PressureCountsPerMmHg; break;
+            case 0x3500: type = WaveformType.CentralVenousPressure; step = 1 / PressureCountsPerMmHg; break;
             default: return null;
         }
 
@@ -492,14 +525,135 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         for (int i = 0; i < samples.Length; i++)
         {
             double value = wave.Samples[i] * step;
-            if (type == WaveformType.Pleth) value = Math.Clamp(value, -0.5, 0.5);
+            if (unitless) value = Math.Clamp(value, -0.5, 0.5);
             samples[i] = (float)Math.Round(value, 4);
         }
 
         return new ScaledWave { Type = type, Samples = samples, SampleRate = LsNetProtocol.SamplesPerSecond };
     }
 
-    private static void AddVitals(UmecVitalsMessage oru, IReadOnlyList<LsNetNumeric> numerics)
+    /// <summary>
+    /// One line whenever the monitor's list of parameters changes: every code it sends with
+    /// the value it has right now, and which of them are not passed on. The wire carries no
+    /// names, so this line next to the monitor's screen is how a new code gets identified.
+    /// </summary>
+    private void LogParameters(Bed bed, IReadOnlyList<LsNetNumeric> numerics)
+    {
+        var signature = string.Join(",", numerics.Select(n => n.Code.ToString("X4", CultureInfo.InvariantCulture)));
+        if (signature == bed.ParameterSignature) return;
+        bed.ParameterSignature = signature;
+
+        static string Code(LsNetNumeric n) => NihonKohdenCodes.FromBytes((byte)(n.Code >> 8), (byte)n.Code);
+        static string Entry(LsNetNumeric n) => $"{Code(n)}={n.Value?.ToString(CultureInfo.InvariantCulture) ?? "--"}";
+
+        var unread = numerics
+            .Where(n => !NihonKohdenCodes.IsTemperature(Code(n)) && !NihonKohdenCodes.TryGetParameter(Code(n), out _))
+            .Select(Entry);
+
+        _logger.LogInformation(
+            "Nihon Kohden monitor {Ip} reports parameters [{Parameters}]; not passed on: [{Unread}].",
+            bed.State.IpAddress, string.Join(", ", numerics.Select(Entry)), string.Join(", ", unread));
+    }
+
+    /// <summary>
+    /// The trail for working out what a code means: at Debug, every numeric whose value or
+    /// status bytes changed since the last report, old and new, and the list of waveforms the
+    /// monitor offers when that changes. Read next to the monitor's screen while one thing at
+    /// a time is changed on it. Off unless this class logs at Debug.
+    /// </summary>
+    private void LogChanges(Bed bed, LsNetDatagram datagram)
+    {
+        var offered = string.Join(" ", datagram.OfferedWaves.Select(c => c.ToString("X4", CultureInfo.InvariantCulture)));
+        if (offered != bed.OfferedSignature)
+        {
+            bed.OfferedSignature = offered;
+            _logger.LogInformation("Nihon Kohden monitor {Ip} offers waveforms [{Waves}].", bed.State.IpAddress, offered);
+        }
+
+        if (!_logger.IsEnabled(LogLevel.Debug))
+        {
+            bed.LastNumerics.Clear();
+            return;
+        }
+
+        static string Show(LsNetNumeric n) =>
+            $"{n.Value?.ToString(CultureInfo.InvariantCulture) ?? "--"} [{n.RawStatus:X12}]";
+
+        var changes = new List<string>();
+        var now = new Dictionary<ushort, LsNetNumeric>();
+        foreach (var numeric in datagram.Numerics!)
+        {
+            now[numeric.Code] = numeric;
+            var code = NihonKohdenCodes.FromBytes((byte)(numeric.Code >> 8), (byte)numeric.Code);
+
+            if (!bed.LastNumerics.TryGetValue(numeric.Code, out var before))
+            {
+                changes.Add($"{code} appears {Show(numeric)}");
+            }
+            else if (before != numeric)
+            {
+                changes.Add($"{code} {Show(before)} -> {Show(numeric)}");
+            }
+        }
+
+        foreach (var gone in bed.LastNumerics.Keys.Where(code => !now.ContainsKey(code)))
+        {
+            changes.Add($"{NihonKohdenCodes.FromBytes((byte)(gone >> 8), (byte)gone)} gone");
+        }
+
+        bed.LastNumerics = now;
+        if (changes.Count > 0)
+        {
+            _logger.LogDebug("Nihon Kohden monitor {Ip} changed: {Changes}", bed.State.IpAddress, string.Join("; ", changes));
+        }
+    }
+
+    /// <summary>
+    /// At Debug, every five seconds: the lowest and highest raw sample of each waveform in
+    /// that time. This is how a scale is found or checked - a pressure trace must run between
+    /// eight times the diastolic and eight times the systolic the monitor reports alongside.
+    /// </summary>
+    private void LogWaveRanges(Bed bed, IReadOnlyList<LsNetWave> waves)
+    {
+        if (!_logger.IsEnabled(LogLevel.Debug) || waves.Count == 0) return;
+
+        foreach (var wave in waves)
+        {
+            if (wave.Samples.Length == 0) continue;
+
+            short low = wave.Samples.Min(), high = wave.Samples.Max();
+            bed.WaveRanges[wave.Code] = bed.WaveRanges.TryGetValue(wave.Code, out var range)
+                ? (Math.Min(range.Min, low), Math.Max(range.Max, high))
+                : (low, high);
+        }
+
+        var now = _clock.Elapsed;
+        if (bed.LastWaveRanges == TimeSpan.MinValue) bed.LastWaveRanges = now;
+        if (now - bed.LastWaveRanges < WaveRangeEvery) return;
+
+        _logger.LogDebug("Nihon Kohden monitor {Ip} raw waveform ranges: {Ranges}", bed.State.IpAddress,
+            string.Join(", ", bed.WaveRanges.OrderBy(r => r.Key).Select(r => $"{r.Key:X4} {r.Value.Min}..{r.Value.Max}")));
+
+        bed.WaveRanges.Clear();
+        bed.LastWaveRanges = now;
+    }
+
+    /// <summary>When the cuff reading in this report was taken, see <see cref="CuffClock"/>.</summary>
+    private static DateTime? CuffTakenAt(Bed bed, IReadOnlyList<LsNetNumeric> numerics)
+    {
+        // 009000 systolic, 009001 diastolic, 009002 mean. While a measurement runs 009008 is 1
+        // and the three carry state 45 with a message code that moves between 1E, 18 and 14
+        // (watched on 2026-11-22), so no single message code can stand for "measuring". A
+        // measurement that fails takes the values off before it ends, so one that ends with
+        // values still there has produced them.
+        int? Value(ushort code) => numerics.FirstOrDefault(n => n.Code == code).Value;
+        bool measuring = Value(0x0908) == 1
+            || numerics.Any(n => n.Code is 0x0900 or 0x0901 or 0x0902 && n.State == 0x45);
+
+        return bed.Cuff.Observe(Value(0x0900), Value(0x0901), Value(0x0902), measuring, DateTime.Now);
+    }
+
+    private static void AddVitals(UmecVitalsMessage oru, IReadOnlyList<LsNetNumeric> numerics, DateTime? cuffTakenAt = null)
     {
         int temperatures = 0;
         foreach (var numeric in numerics)
@@ -518,7 +672,7 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
             }
 
             double? value = numeric.Value is int raw ? Math.Round(raw * NihonKohdenCodes.LsNetScale(code), 2) : null;
-            oru.Vitals.Add(new VitalSign
+            var vital = new VitalSign
             {
                 ParameterId = target.ParameterId,
                 Name = target.Name,
@@ -526,7 +680,20 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
                 Value = value,
                 RawValue = numeric.Value?.ToString(CultureInfo.InvariantCulture) ?? "",
                 IsAperiodic = NihonKohdenCodes.IsAperiodic(code),
-            });
+                MeasuredAt = NihonKohdenCodes.IsAperiodic(code) ? cuffTakenAt : null,
+            };
+
+            // Two codes can stand for one measurement (the respiration rate): it is listed
+            // once, by the code that has a value.
+            int listed = oru.Vitals.FindIndex(v => v.ParameterId == vital.ParameterId);
+            if (listed < 0)
+            {
+                oru.Vitals.Add(vital);
+            }
+            else if (oru.Vitals[listed].Value is null && value is not null)
+            {
+                oru.Vitals[listed] = vital;
+            }
         }
     }
 
@@ -542,6 +709,10 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         bed.LastPatientQuery = TimeSpan.MinValue;
         bed.LastAlarms = TimeSpan.MinValue;
         bed.LastTechnical = TimeSpan.MinValue;
+        bed.ParameterSignature = "";
+        bed.OfferedSignature = "";
+        bed.LastNumerics.Clear();
+        bed.Cuff.Reset();
         _logger.LogInformation("Nihon Kohden monitor {Ip} is streaming over LS-NET.", bed.State.IpAddress);
         OnDeviceConnected?.Invoke(this, bed.State);
     }
@@ -559,7 +730,10 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         OnDeviceDisconnected?.Invoke(this, bed.State);
     }
 
-    /// <summary>"0101", "0700" -> codes; ECG II and pleth when the list is empty or holds nothing usable.</summary>
+    /// <summary>
+    /// "0101", "0700" -> codes; every waveform a station draws when the list is empty or holds
+    /// nothing usable: ECG II, arterial pressure, pleth, central venous pressure, respiration.
+    /// </summary>
     private static ushort[] WaveCodes(IEnumerable<string> configured)
     {
         var codes = configured
@@ -567,7 +741,7 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
             .Where(code => code != 0)
             .Distinct()
             .ToArray();
-        return codes.Length > 0 ? codes : new ushort[] { 0x0101, 0x0700 };
+        return codes.Length > 0 ? codes : new ushort[] { 0x0101, 0x2C00, 0x0700, 0x3500, 0x0500 };
     }
 
     /// <summary>"ICU-001" -> "1": the roster numbers beds, the monitor names them.</summary>

@@ -9,7 +9,16 @@
   <ItemGroup>
     <PackageReference Include="FastEndpoints" Version="8.3.0" />
     <PackageReference Include="FastEndpoints.Swagger" Version="8.3.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
     <PackageReference Include="NReco.Logging.File" Version="1.2.1" />
+  </ItemGroup>
+
+  <!-- What belongs to one machine stays on it: its settings and the patient records it keeps
+       are not carried into a published copy (deploy/Install-Server.ps1). -->
+  <ItemGroup>
+    <Content Update="appsettings.Local.json;appsettings.Development.json" CopyToPublishDirectory="Never" />
+    <Content Remove="data\**" />
+    <None Remove="data\**" />
   </ItemGroup>
 
   <ItemGroup>

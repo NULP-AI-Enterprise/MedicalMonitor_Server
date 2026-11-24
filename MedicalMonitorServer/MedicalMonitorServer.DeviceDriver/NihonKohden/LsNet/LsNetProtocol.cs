@@ -42,8 +42,13 @@ internal enum LsNetKind
 /// measurement runs (code 0x1E) or the parameter is switched off (0x21).
 /// </param>
 /// <param name="StateCode">Sixth status byte: which message <paramref name="State"/> is about.</param>
+/// <param name="RawStatus">
+/// All six status bytes as sent, first byte highest: only four of them are understood, and the
+/// log of changes (see the provider) shows them whole so that the rest can be worked out.
+/// </param>
 internal readonly record struct LsNetNumeric(
-    ushort Code, int? Value, byte Alarm = LsNetAlarm.None, bool Sounding = false, byte State = LsNetAlarm.None, byte StateCode = 0);
+    ushort Code, int? Value, byte Alarm = LsNetAlarm.None, bool Sounding = false, byte State = LsNetAlarm.None, byte StateCode = 0,
+    ulong RawStatus = 0);
 
 /// <summary>
 /// A state byte of the numeric block: the alarm level in the high half, as in
@@ -109,6 +114,9 @@ internal sealed class LsNetDatagram
 
     /// <summary>With <see cref="Numerics"/>: the message code of <see cref="TechnicalState"/>.</summary>
     public byte TechnicalCode { get; init; }
+
+    /// <summary>With <see cref="Numerics"/>: the waveform codes the monitor can stream right now.</summary>
+    public IReadOnlyList<ushort> OfferedWaves { get; init; } = Array.Empty<ushort>();
 }
 
 /// <summary>
@@ -258,8 +266,8 @@ internal static class LsNetProtocol
         {
             if (d.Length < 26) return null;
 
-            var numerics = ParseNumerics(d, 24, out byte state, out byte code);
-            return new LsNetDatagram { Kind = LsNetKind.Numerics, Numerics = numerics, TechnicalState = state, TechnicalCode = code };
+            var numerics = ParseNumerics(d, 24, out byte state, out byte code, out var offered);
+            return new LsNetDatagram { Kind = LsNetKind.Numerics, Numerics = numerics, TechnicalState = state, TechnicalCode = code, OfferedWaves = offered };
         }
 
         if (d.Length < 32) return new LsNetDatagram { Kind = LsNetKind.Other };
@@ -335,7 +343,8 @@ internal static class LsNetProtocol
         }
 
         byte technicalState = LsNetAlarm.None, technicalCode = 0;
-        var numerics = d[23] == 0x01 ? ParseNumerics(d, at, out technicalState, out technicalCode) : null;
+        ushort[] offered = Array.Empty<ushort>();
+        var numerics = d[23] == 0x01 ? ParseNumerics(d, at, out technicalState, out technicalCode, out offered) : null;
 
         return new LsNetDatagram
         {
@@ -345,6 +354,7 @@ internal static class LsNetProtocol
             Numerics = numerics,
             TechnicalState = technicalState,
             TechnicalCode = technicalCode,
+            OfferedWaves = offered,
         };
     }
 
@@ -357,10 +367,12 @@ internal static class LsNetProtocol
     /// byte and a message code; the second pair is the monitor's technical alarm, the fourth
     /// repeats the highest limit alarm of the records.
     /// </summary>
-    private static List<LsNetNumeric>? ParseNumerics(ReadOnlySpan<byte> d, int at, out byte technicalState, out byte technicalCode)
+    private static List<LsNetNumeric>? ParseNumerics(
+        ReadOnlySpan<byte> d, int at, out byte technicalState, out byte technicalCode, out ushort[] offeredWaves)
     {
         technicalState = LsNetAlarm.None;
         technicalCode = 0;
+        offeredWaves = Array.Empty<ushort>();
         if (at + 2 > d.Length) return null;
 
         int countAt = at + 2 + 2 * d[at] + 36;
@@ -373,6 +385,12 @@ internal static class LsNetProtocol
         technicalState = d[countAt - 6];
         technicalCode = d[countAt - 5];
 
+        offeredWaves = new ushort[d[at]];
+        for (int i = 0; i < offeredWaves.Length; i++)
+        {
+            offeredWaves[i] = BinaryPrimitives.ReadUInt16BigEndian(d[(at + 2 + 2 * i)..]);
+        }
+
         var numerics = new List<LsNetNumeric>(count);
         for (int i = 0; i < count; i++)
         {
@@ -384,7 +402,9 @@ internal static class LsNetProtocol
                 Alarm: record[4],
                 Sounding: (record[2] & 0x40) != 0,
                 State: record[6],
-                StateCode: record[7]));
+                StateCode: record[7],
+                RawStatus: ((ulong)record[2] << 40) | ((ulong)record[3] << 32) | ((ulong)record[4] << 24)
+                           | ((ulong)record[5] << 16) | ((ulong)record[6] << 8) | record[7]));
         }
 
         return numerics;

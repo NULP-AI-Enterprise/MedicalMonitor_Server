@@ -25,6 +25,12 @@ public enum WaveformType
     ECG_I,
     Pleth,
     Respiration,
+
+    /// <summary>Invasive arterial pressure, in mmHg.</summary>
+    ArterialPressure,
+
+    /// <summary>Central venous pressure, in mmHg.</summary>
+    CentralVenousPressure,
 }
 
 /// <param name="PatientType">"Adu" (adult), "Ped" (pediatric) or "Neo" (neonatal).</param>
@@ -40,12 +46,18 @@ public record PatientInfoDto(
 /// <param name="BedNumber">Bed the monitor reports; 0 when it has not reported one.</param>
 /// <param name="PatientId">Patient whose data this monitor provides; null when nobody is bound.</param>
 /// <param name="ReportedPatientId">Patient id the monitor itself sends; empty when it has none, null when not yet known.</param>
+/// <param name="Model">
+/// Make and model of the monitor, to show which device a bed is on: "Nihon Kohden BSM-3562",
+/// "Mindray uMEC". Filled in by the endpoint that lists the monitors; null where it is not
+/// known.
+/// </param>
 public record MonitorBindingDto(
     string MonitorIp,
     int BedNumber,
     string? PatientId,
     string? ReportedPatientId,
-    DateTimeOffset LastSeen);
+    DateTimeOffset LastSeen,
+    string? Model = null);
 
 /// <param name="Patient">The patient after the move (bed follows the monitor).</param>
 /// <param name="PreviousMonitorIp">Monitor the patient was on before; null if none.</param>
@@ -85,24 +97,49 @@ public enum DeviceAlarmLevel
 }
 
 /// <summary>Every value is null when it is not measured (sensor off, no reading yet).</summary>
-public record BloodPressureDto(int? Systolic, int? Diastolic, int? MeanArterialPressure);
+/// <param name="MeasuredAt">
+/// When the cuff reading was taken, as the monitor reports it; null when the monitor does not
+/// say. A cuff reading stands until the next one, so its age is part of the reading.
+/// </param>
+public record BloodPressureDto(int? Systolic, int? Diastolic, int? MeanArterialPressure, DateTimeOffset? MeasuredAt = null);
+
+/// <summary>
+/// A measured value of the patient's monitor beyond the six every station has a place for:
+/// an arterial line, a central venous pressure, a second temperature, ST, PVCs, a perfusion
+/// index. Which ones a patient has depends on the monitor and on what is connected to it.
+/// </summary>
+/// <param name="Code">
+/// Stable key a station places the value by: "art.sys", "art.dia", "art.mean", "cvp.mean",
+/// "temp.2", "ecg.pvc", "ecg.st.ii", "spo2.pi", ... A measurement the server has no key for
+/// comes as "p.{monitor's parameter id}" in the group "other", under the monitor's own label.
+/// </param>
+/// <param name="Label">Short name to show, e.g. "ART Sys", "T2", "ST-II".</param>
+/// <param name="Unit">Unit of <paramref name="Value"/>; empty when it has none.</param>
+/// <param name="Group">What it belongs with on a station: "ecg", "spo2", "art", "cvp", "resp", "temp" or "other".</param>
+public record ParameterDto(string Code, string Label, double Value, string Unit, string Group);
 
 /// <summary>
 /// Latest known vitals. A null value means "no data". On ingestion 0 is still accepted as
 /// "not measured" and is stored as null, so the server never sends 0 for a missing reading.
 /// </summary>
+/// <param name="Parameters">
+/// Every other value the monitor measures right now, see <see cref="ParameterDto"/>; null when
+/// there is none. A station that does not know the field loses nothing it had before.
+/// </param>
 public record VitalsDto(
     int? HeartRate,
     int? SpO2,
     BloodPressureDto? Nibp,
     int? RespiratoryRate,
     double? Temperature,
-    int? PulseRate);
+    int? PulseRate,
+    IReadOnlyList<ParameterDto>? Parameters = null);
 
 /// <summary>
 /// A run of consecutive samples of one waveform, scaled for drawing: an ECG is in
-/// millivolts around its zero line, any other waveform is centred on 0 and spans about
-/// -0.5 .. 0.5. A station plays the samples out at <paramref name="SampleRate"/>.
+/// millivolts around its zero line, a pressure (arterial, central venous) is in mmHg, any
+/// other waveform is centred on 0 and spans about -0.5 .. 0.5. A station plays the samples
+/// out at <paramref name="SampleRate"/>.
 /// </summary>
 /// <param name="SampleRate">
 /// Samples per second, set by the source: a uMec sends ECG and Pleth at 256 Hz and

@@ -441,3 +441,7 @@ Parser/read
 # Live server logs stay local; snapshots worth keeping are copied to captures/
 MedicalMonitorServer/MedicalMonitorServer/logs/
 !MedicalMonitorServer/captures/*.log
+
+# Per-machine settings and what the running server keeps (patient records, logs)
+appsettings.Local.json
+MedicalMonitorServer/MedicalMonitorServer/data/

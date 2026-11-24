@@ -35,19 +35,23 @@ public sealed class MonitorRouter
     private readonly Dictionary<string, string> _loggedDrops = new(StringComparer.Ordinal);
 
     private readonly IMonitorAdmissions? _admissions;
+    private readonly IPatientRecordStore _records;
 
     /// <param name="admissions">Writes the patient to monitors that take it; without one no monitor is told anything.</param>
+    /// <param name="records">Patient records kept across restarts; nothing is kept when omitted.</param>
     public MonitorRouter(
         IMonitorBindings bindings,
         IMonitorPipeline pipeline,
         IPatientRegistry patients,
         ILogger<MonitorRouter> logger,
-        IMonitorAdmissions? admissions = null)
+        IMonitorAdmissions? admissions = null,
+        IPatientRecordStore? records = null)
     {
         _bindings = bindings;
         _pipeline = pipeline;
         _patients = patients;
         _admissions = admissions;
+        _records = records ?? new NoPatientRecordStore();
         _logger = logger;
     }
 
@@ -129,7 +133,7 @@ public sealed class MonitorRouter
 
             if (result.Change is { } change)
             {
-                await ApplyAsync(change, info, ct);
+                await ApplyAsync(change, info, byMonitor: true, ct);
             }
             else if (result.PatientId is not null && info is not null)
             {
@@ -225,7 +229,7 @@ public sealed class MonitorRouter
             }
 
             var change = result.Change!;
-            await ApplyAsync(change, null, ct);
+            await ApplyAsync(change, null, byMonitor: false, ct);
 
             _logger.LogInformation(
                 "Patient {PatientId} transferred by operator to monitor {MonitorIp} (was on {PreviousMonitorIp}).",
@@ -245,7 +249,11 @@ public sealed class MonitorRouter
         }
     }
 
-    private async Task ApplyAsync(BindingChange change, PatientInfo? info, CancellationToken ct)
+    /// <param name="byMonitor">
+    /// The change is what the monitor itself reported, not an operator's transfer. It decides
+    /// what becomes of a patient who lost the monitor: see below.
+    /// </param>
+    private async Task ApplyAsync(BindingChange change, PatientInfo? info, bool byMonitor, CancellationToken ct)
     {
         string? inheritedDiagnosis = null;
         if (change.SupersededPatientId is { } superseded)
@@ -257,9 +265,24 @@ public sealed class MonitorRouter
 
         if (change.UnboundPatientId is { } unbound)
         {
-            _logger.LogInformation(
-                "Patient {PatientId} is no longer on monitor {MonitorIp}; left on the roster without a monitor.",
-                unbound, change.MonitorIp);
+            if (byMonitor)
+            {
+                // The monitor no longer has this patient: they were discharged at the bedside, or
+                // the next one was admitted in their place. A patient is discharged on the
+                // monitor and nowhere else, so this is where they leave the roster too.
+                _logger.LogInformation(
+                    "Patient {PatientId} was discharged on monitor {MonitorIp}; removed from the roster.",
+                    unbound, change.MonitorIp);
+                await _pipeline.RemovePatientAsync(unbound, ct);
+            }
+            else
+            {
+                // An operator put somebody else on the monitor. The patient who was on it is
+                // still in the unit and is waiting for a monitor of their own.
+                _logger.LogInformation(
+                    "Patient {PatientId} is no longer on monitor {MonitorIp}; left on the roster without a monitor.",
+                    unbound, change.MonitorIp);
+            }
         }
 
         if (change.PatientId is null) return;
@@ -288,7 +311,9 @@ public sealed class MonitorRouter
     /// </summary>
     private Task UpsertBoundAsync(string patientId, PatientInfo? info, int bed, string? inheritedDiagnosis, CancellationToken ct)
     {
-        var existing = _patients.Get(patientId);
+        // On the roster already, or known from before a restart: the bed, the diagnosis and a
+        // name the monitor does not give are then taken from the record that was kept.
+        var existing = _patients.Get(patientId) ?? _records.Get(patientId);
 
         // Demographics apply only when the monitor names this very patient; after a manual
         // transfer it may still carry the record of whoever was admitted on it before.

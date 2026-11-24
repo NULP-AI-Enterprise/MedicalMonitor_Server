@@ -29,6 +29,24 @@ public sealed class VitalSign
     public DateTime? MeasuredAt { get; set; }
 }
 
+/// <summary>
+/// Values of <see cref="VitalSign.ParameterId"/> that are this server's own: measurements the
+/// uMec parameter table has no id for, which so far only a Nihon Kohden has been seen to send.
+/// Kept clear of every Mindray id in use, so a driver can hand them over like any other value.
+/// </summary>
+public static class ServerParameterIds
+{
+    public const int ArtSystolic = 9100;
+    public const int ArtDiastolic = 9101;
+    public const int ArtMean = 9102;
+    public const int CvpSystolic = 9110;
+    public const int CvpDiastolic = 9111;
+    public const int CvpMean = 9112;
+
+    /// <summary>ST of the chest leads V1 to V6: this id and the five after it. Mindray's table has one "ST-V".</summary>
+    public const int StV1 = 9120;
+}
+
 /// <summary>Display label the monitor uses for a parameter (OBX 2025), e.g. 101 -> "ЧСС".</summary>
 public sealed class ParameterLabel
 {

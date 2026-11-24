@@ -12,8 +12,35 @@ using MedicalMonitorServer.DeviceDriver.Umec;
 using MedicalMonitorServer.Hubs;
 using MedicalMonitorServer.Security;
 using MedicalMonitorServer.Services;
+using Microsoft.Extensions.Hosting.WindowsServices;
 
-var builder = WebApplication.CreateBuilder(args);
+// Started by the service control manager the working directory is System32, so a service
+// takes its content root (appsettings, logs, patient records, the station UI) from where the
+// executable is. Run from a console, the working directory is the content root as before.
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = WindowsServiceHelpers.IsWindowsService() ? AppContext.BaseDirectory : null,
+});
+
+// Does nothing unless the process was started as a Windows service (deploy/Install-Server.ps1).
+builder.Host.UseWindowsService(options => options.ServiceName = "MedicalMonitorServer");
+
+// Settings of this one machine - where its copy of the station UI is, say - go in
+// appsettings.Local.json next to appsettings.json. The file is not in the repository. It is
+// read after the appsettings files and before the environment, so a variable still overrides it.
+var localSettings = new Microsoft.Extensions.Configuration.Json.JsonConfigurationSource
+{
+    Path = "appsettings.Local.json",
+    Optional = true,
+    ReloadOnChange = false,
+};
+// The last environment source is the one that holds the application's settings; the ones
+// before it carry the host's own (ASPNETCORE_...) and come ahead of the appsettings files.
+var environmentAt = builder.Configuration.Sources
+    .ToList()
+    .FindLastIndex(source => source is Microsoft.Extensions.Configuration.EnvironmentVariables.EnvironmentVariablesConfigurationSource);
+builder.Configuration.Sources.Insert(environmentAt < 0 ? builder.Configuration.Sources.Count : environmentAt, localSettings);
 
 // Daily log file next to the console log (Logging:File in appsettings). Alert transitions are logged
 // too, so the file is also the alarm history. Relative paths are under the content root.
@@ -122,6 +149,19 @@ builder.Services.AddSignalR()
     });
 
 builder.Services.AddSingleton<IPatientRegistry, PatientRegistry>();
+
+// What stations record about a patient (bed, diagnosis, a name the monitor does not give) is
+// kept in "Roster:Path", relative to the content root, so that a restart does not lose it.
+// An empty path keeps nothing.
+builder.Services.AddSingleton<IPatientRecordStore>(serviceProvider =>
+{
+    var path = serviceProvider.GetRequiredService<IConfiguration>()["Roster:Path"];
+    if (string.IsNullOrWhiteSpace(path)) return new NoPatientRecordStore();
+
+    return new JsonFilePatientRecordStore(
+        Path.Combine(serviceProvider.GetRequiredService<IHostEnvironment>().ContentRootPath, path),
+        serviceProvider.GetRequiredService<ILogger<JsonFilePatientRecordStore>>());
+});
 builder.Services.AddSingleton<IAlertStateService, AlertStateService>();
 builder.Services.AddSingleton<IMonitorBindings, MonitorBindings>();
 builder.Services.AddSingleton<MonitorRouter>();

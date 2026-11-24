@@ -15,6 +15,9 @@ public class DeviceService : IDeviceService, IMonitorAdmissions
 
     private readonly NihonKohdenDeviceDataProvider? _nihonKohden;
 
+    /// <summary>Address to name of the configured Nihon Kohden monitors, whichever protocol they are on.</summary>
+    private readonly Dictionary<string, string> _nihonKohdenNames = new(StringComparer.Ordinal);
+
     /// <summary>
     /// Guards <see cref="_deviceStates"/>. It is reached from the watchdog's scan
     /// (a monitor went away), from every link thread (a stream opened or ended)
@@ -57,6 +60,11 @@ public class DeviceService : IDeviceService, IMonitorAdmissions
         NihonKohdenLsNetProvider? lsNetProvider = null;
         if (nihonKohden is { Monitors.Count: > 0 })
         {
+            foreach (var monitor in nihonKohden.Monitors)
+            {
+                _nihonKohdenNames[monitor.Ip] = monitor.Name;
+            }
+
             if (nihonKohden.Monitors.Any(m => !m.IsLsNet))
             {
                 var hl7 = new NihonKohdenOptions
@@ -94,6 +102,23 @@ public class DeviceService : IDeviceService, IMonitorAdmissions
         _nihonKohden = nihonKohdenProvider;
         nihonKohdenProvider?.Start();
         lsNetProvider?.Start();
+    }
+
+    /// <summary>
+    /// Make and model of the monitor at an address, for a station to show which device a bed
+    /// is on. A Nihon Kohden is one of the monitors named in configuration, and carries the
+    /// name given there. Every other monitor is one the watchdog found on the uMec port and
+    /// the uMec driver reads; the driver does not ask it for its exact model.
+    /// </summary>
+    public string DescribeMonitor(string monitorIp)
+    {
+        if (!_nihonKohdenNames.TryGetValue(monitorIp, out var name)) return "Mindray uMEC";
+
+        name = name.Trim();
+        if (name.Length == 0) return "Nihon Kohden";
+
+        // Configured as "BSM-3562", or already with the make in front.
+        return name.StartsWith("Nihon Kohden", StringComparison.OrdinalIgnoreCase) ? name : $"Nihon Kohden {name}";
     }
 
     /// <summary>Only Nihon Kohden monitors on HL7 take a patient over the network; any other is told nothing.</summary>

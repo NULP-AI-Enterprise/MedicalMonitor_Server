@@ -123,6 +123,70 @@ public class CompleteReportTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_cuff_reading_the_monitor_lists_without_numbers_leaves_the_station()
+    {
+        await DeliverUntilAsync(Report(true, (101, 80), (170, 122), (171, 76), (172, 91)),
+            () => Readings() is { Systolic: 122 }, "the report with the measurement is in");
+
+        // The next measurement fails: the monitor still lists the cuff pressures, with no value
+        // (a Nihon Kohden, 2026-11-22). Its old reading must not stay on the station as current.
+        await DeliverUntilAsync(Report(true, (101, 80), (170, null), (171, null), (172, null)),
+            () => Readings() is { Systolic: null }, "the reading is taken off");
+
+        var readings = Readings()!;
+        Assert.Null(readings.Systolic);
+        Assert.Null(readings.Diastolic);
+        Assert.Null(readings.MeanArterialPressure);
+        Assert.Equal(80, readings.HeartRate);
+    }
+
+    [Fact]
+    public async Task A_piecemeal_monitor_listing_the_cuff_without_numbers_keeps_the_last_reading()
+    {
+        // A uMec: what its "no valid measurement" for the cuff means has not been watched.
+        await DeliverUntilAsync(Report(false, (170, 120), (171, 80), (172, 93)),
+            () => Readings() is { Systolic: 120 }, "the measurement is in");
+
+        await DeliverUntilAsync(Report(false, (101, 61), (170, null), (171, null), (172, null)),
+            () => Readings() is { HeartRate: 61 }, "the next message is in");
+
+        Assert.Equal(120, Readings()!.Systolic);
+    }
+
+    [Fact]
+    public async Task An_arterial_line_reaches_the_station_and_leaves_it_when_it_is_taken_out()
+    {
+        // HR 101 and the arterial line, which the monitor measures besides the six vitals.
+        await DeliverUntilAsync(
+            Report(true, (101, 80), (ServerParameterIds.ArtSystolic, 118), (ServerParameterIds.ArtDiastolic, 76), (ServerParameterIds.ArtMean, 91)),
+            () => Readings() is { Parameters: not null }, "the report with the line is in");
+
+        var parameters = Readings()!.ToDto().Parameters!;
+        Assert.Equal(new[] { "art.dia", "art.mean", "art.sys" }, parameters.Select(p => p.Code));
+        Assert.Equal(118, parameters.Single(p => p.Code == "art.sys").Value);
+
+        // The line is taken out: the next complete report does not list it.
+        await DeliverUntilAsync(Report(true, (101, 81)),
+            () => Readings() is { HeartRate: 81 }, "the next report is in");
+
+        Assert.Null(Readings()!.Parameters);
+    }
+
+    [Fact]
+    public async Task A_piecemeal_monitor_withdraws_a_parameter_by_listing_it_without_a_number()
+    {
+        // A uMec: SpO2 with its perfusion index (162)...
+        await DeliverUntilAsync(Report(false, (160, 98), (162, 12.0)),
+            () => Readings() is { Parameters: not null }, "the message with the index is in");
+
+        // ...then the probe slips: the index comes as "no valid measurement", nothing else in the message.
+        await DeliverUntilAsync(Report(false, (162, null)),
+            () => Readings() is { Parameters: null }, "the index is taken off");
+
+        Assert.Equal(98, Readings()!.SpO2);
+    }
+
+    [Fact]
     public async Task A_piecemeal_report_still_only_adds()
     {
         // What a uMec does: each message carries some of the values.
