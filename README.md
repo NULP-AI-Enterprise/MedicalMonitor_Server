@@ -47,6 +47,25 @@ A patient is on the roster while a monitor reports them, and is removed when the
 
 What stations record about a patient - bed, diagnosis, a name for one the monitor does not name - is kept in `data/patients.json` under the content root (`Roster:Path`; empty keeps nothing) and comes back after a restart as soon as the patient's monitor reports them. A monitor that gives no patient id gets an "Unidentified patient" entry, which is not kept: after a restart somebody else may be on that monitor.
 
+## Starting a cuff measurement from a station
+
+A Nihon Kohden monitor read over LS-NET can be told to start an NIBP measurement and to stop the one that is running:
+
+```
+POST /api/v1/patients/{patientId}/nibp/start
+POST /api/v1/patients/{patientId}/nibp/stop
+```
+
+It is off unless turned on, because it inflates a cuff on a patient at the word of somebody who is not at the bedside. Turn it on in the settings of the computer the server is installed on, `C:\MedicalMonitor\appsettings.Production.json` (kept across updates):
+
+```json
+{ "NihonKohden": { "LsNet": { "RemoteNibp": true } } }
+```
+
+`GET /api/v1/monitors` then says `canStartNibp: true` for these monitors, and the station shows NIBP START in the detail view of their beds. Both requests are writes: they need the operator key, except from the station on the server's own computer.
+
+`202` means the command was sent to the monitor, once. The server never repeats it. What the monitor made of it is in the vitals that follow (`nibp.measuring`, then the reading) and in the log, which has a line for every request with where it came from, one for the command, one for the monitor's acknowledgement and one for the cuff starting or stopping - or a warning when it did not. A start is refused (`409`, with the reason) while the monitor reports a measurement running, for three seconds after another start, and for a monitor that is not sending data. A uMEC and a Nihon Kohden on HL7 have no such command.
+
 ## Tests
 
 ```

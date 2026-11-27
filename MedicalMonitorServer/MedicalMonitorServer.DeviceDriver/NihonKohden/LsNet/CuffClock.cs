@@ -20,6 +20,12 @@ internal sealed class CuffClock
     public DateTime? TakenAt { get; private set; }
 
     /// <summary>
+    /// The monitor's last report said a measurement is running. Any reading it still lists
+    /// while this is true is the one before, about to be replaced.
+    /// </summary>
+    public bool Measuring => _measuring;
+
+    /// <summary>
     /// Takes the monitor's report of one second.
     /// </summary>
     /// <param name="measuring">The monitor says a measurement is running (cuff inflated).</param>

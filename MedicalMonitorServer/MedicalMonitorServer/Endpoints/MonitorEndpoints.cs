@@ -34,11 +34,17 @@ public sealed class GetMonitorsEndpoint : EndpointWithoutRequest<List<MonitorBin
         Summary(s => s.Summary = "Monitors that have sent data, what each one is and the patient it feeds");
     }
 
-    // The bindings know a monitor by its address only; what kind of device answers there is
-    // the drivers' knowledge, added here.
+    // The bindings know a monitor by its address only; what kind of device answers there, and
+    // whether its cuff can be started from a station, is the drivers' knowledge, added here.
     public override Task HandleAsync(CancellationToken ct) =>
         Send.OkAsync(
-            _bindings.GetAll().Select(b => b with { Model = _devices.DescribeMonitor(b.MonitorIp) }).ToList(),
+            _bindings.GetAll()
+                .Select(b => b with
+                {
+                    Model = _devices.DescribeMonitor(b.MonitorIp),
+                    CanStartNibp = _devices.CanControlCuff(b.MonitorIp),
+                })
+                .ToList(),
             ct);
 }
 

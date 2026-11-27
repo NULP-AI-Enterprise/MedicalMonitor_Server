@@ -121,6 +121,28 @@ public class DeviceService : IDeviceService, IMonitorAdmissions
         return name.StartsWith("Nihon Kohden", StringComparison.OrdinalIgnoreCase) ? name : $"Nihon Kohden {name}";
     }
 
+    /// <summary>
+    /// Whether a station may have this monitor take a cuff measurement: true for the monitors
+    /// of a driver that can send the command and has been allowed to (see <see cref="IRemoteCuff"/>).
+    /// </summary>
+    public bool CanControlCuff(string monitorIp) =>
+        _deviceDataProviders.OfType<IRemoteCuff>().Any(driver => driver.CanControlCuff(monitorIp));
+
+    /// <summary>
+    /// Passes a station's request to start or stop a cuff measurement to the driver that reads
+    /// the monitor. The answer of the first driver that knows the monitor stands.
+    /// </summary>
+    public CuffRequestStatus RequestCuff(string monitorIp, bool start)
+    {
+        foreach (var driver in _deviceDataProviders.OfType<IRemoteCuff>())
+        {
+            var status = driver.RequestCuff(monitorIp, start);
+            if (status != CuffRequestStatus.NotSupported) return status;
+        }
+
+        return CuffRequestStatus.NotSupported;
+    }
+
     /// <summary>Only Nihon Kohden monitors on HL7 take a patient over the network; any other is told nothing.</summary>
     public Task<MonitorAdmissionResult> AssignPatientAsync(
         string monitorIp, string patientId, string patientName, CancellationToken cancellationToken = default) =>

@@ -168,6 +168,10 @@ builder.Services.AddSingleton<MonitorRouter>();
 builder.Services.AddSingleton<ConnectionTracker>();
 builder.Services.AddSingleton<FeedStatus>();
 builder.Services.AddSingleton<IMonitorPipeline, MonitorPipeline>();
+
+// A station's start and stop of a cuff measurement; the drivers refuse unless it was turned on
+// for their monitors (NihonKohden:LsNet:RemoteNibp).
+builder.Services.AddSingleton<NibpControl>();
 builder.Services.AddHostedService<UmecFeedService>();
 builder.Services.AddHostedService<MonitorSilenceService>();
 

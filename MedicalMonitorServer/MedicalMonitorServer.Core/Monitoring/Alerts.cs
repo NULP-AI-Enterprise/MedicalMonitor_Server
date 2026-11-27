@@ -53,6 +53,11 @@ public static class VitalThresholds
 /// failed, or the patient changed - so the reading it had no longer stands. That is not the
 /// same as a report that does not mention the cuff, which leaves the last reading in place.
 /// </param>
+/// <param name="NibpMeasuring">
+/// The monitor says a cuff measurement is running. A state of the moment, not a reading: it is
+/// what the latest report says and never carried over from an earlier one, so a report that
+/// does not say it ends it.
+/// </param>
 public sealed record VitalReadings(
     int? HeartRate = null,
     int? SpO2 = null,
@@ -65,7 +70,8 @@ public sealed record VitalReadings(
     IReadOnlyDictionary<string, ParameterDto>? Parameters = null,
     IReadOnlyCollection<string>? WithdrawnParameters = null,
     DateTimeOffset? NibpMeasuredAt = null,
-    bool CuffWithdrawn = false)
+    bool CuffWithdrawn = false,
+    bool NibpMeasuring = false)
 {
     /// <summary>
     /// Builds readings from a wire DTO. Both null and 0 mean "not measured" (0 is kept for
@@ -83,7 +89,8 @@ public sealed record VitalReadings(
         vitals.Parameters is { Count: > 0 } parameters
             ? parameters.GroupBy(p => p.Code).ToDictionary(g => g.Key, g => g.Last())
             : null,
-        NibpMeasuredAt: vitals.Nibp?.MeasuredAt);
+        NibpMeasuredAt: vitals.Nibp?.MeasuredAt,
+        NibpMeasuring: vitals.Nibp?.Measuring ?? false);
 
     private static int? Measured(int? value) => value > 0 ? value : null;
 
@@ -113,7 +120,8 @@ public sealed record VitalReadings(
         update.PulseRate ?? PulseRate,
         MergeParameters(Parameters, update.Parameters, update.WithdrawnParameters),
         // The time belongs to the reading: a new reading without one must not keep the old time.
-        NibpMeasuredAt: update.HasCuffReading ? update.NibpMeasuredAt : update.CuffWithdrawn ? null : NibpMeasuredAt);
+        NibpMeasuredAt: update.HasCuffReading ? update.NibpMeasuredAt : update.CuffWithdrawn ? null : NibpMeasuredAt,
+        NibpMeasuring: update.NibpMeasuring);
 
     /// <summary>
     /// Takes <paramref name="snapshot"/> as everything the monitor measures right now: a running
@@ -132,7 +140,8 @@ public sealed record VitalReadings(
         snapshot.Temperature,
         snapshot.PulseRate,
         snapshot.Parameters,
-        NibpMeasuredAt: snapshot.HasCuffReading ? snapshot.NibpMeasuredAt : snapshot.CuffWithdrawn ? null : NibpMeasuredAt);
+        NibpMeasuredAt: snapshot.HasCuffReading ? snapshot.NibpMeasuredAt : snapshot.CuffWithdrawn ? null : NibpMeasuredAt,
+        NibpMeasuring: snapshot.NibpMeasuring);
 
     private static IReadOnlyDictionary<string, ParameterDto>? MergeParameters(
         IReadOnlyDictionary<string, ParameterDto>? current,
@@ -160,7 +169,7 @@ public sealed record VitalReadings(
         return new VitalsDto(
             HeartRate,
             SpO2,
-            new BloodPressureDto(Systolic, Diastolic, map, HasCuffReading ? NibpMeasuredAt : null),
+            new BloodPressureDto(Systolic, Diastolic, map, HasCuffReading ? NibpMeasuredAt : null, NibpMeasuring),
             RespiratoryRate,
             Temperature,
             PulseRate,

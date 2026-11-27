@@ -112,6 +112,12 @@ public sealed class UmecVitalsMessage
     /// </summary>
     public bool VitalsAreComplete { get; set; }
 
+    /// <summary>
+    /// True while the monitor says a cuff measurement is running. Set only by a driver whose
+    /// monitor reports it (a Nihon Kohden over LS-NET); false says nothing for the others.
+    /// </summary>
+    public bool NibpMeasuring { get; set; }
+
     public List<AlarmSetting> AlarmSettings { get; set; } = new();
 
     public List<ActiveAlarm> Alarms { get; set; } = new();
