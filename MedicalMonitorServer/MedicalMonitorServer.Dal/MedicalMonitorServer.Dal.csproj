@@ -6,4 +6,10 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <!-- The history of admitted patients (History\) is an SQLite file. The package brings the
+       native library with it, so nothing has to be installed on the station computer. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.34" />
+  </ItemGroup>
+
 </Project>

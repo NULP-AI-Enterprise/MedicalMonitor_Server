@@ -60,7 +60,8 @@ public sealed class ApiKeyOptions
 /// <summary>
 /// Ingestion routes need the ingestion key; any other non-read /api request needs the operator key,
 /// except from a trusted local station (see <see cref="ApiKeyOptions.IsTrustedLocal"/>).
-/// Read-only GETs stay open for the nurse stations.
+/// Read-only GETs stay open for the nurse stations, but for the recorded history
+/// (/api/v1/history), which is read like an operator route.
 /// </summary>
 public sealed class ApiKeyMiddleware
 {
@@ -101,6 +102,11 @@ public sealed class ApiKeyMiddleware
         var path = request.Path;
         if (path.StartsWithSegments("/api/v1/ingestion", StringComparison.OrdinalIgnoreCase))
             return (_options.IngestionKey, false);
+
+        // The recorded history names every patient who was ever admitted here, with their
+        // values: reading it is an operator's business, not the ward network's.
+        if (path.StartsWithSegments("/api/v1/history", StringComparison.OrdinalIgnoreCase))
+            return (_options.OperatorKey, true);
 
         if (path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase) &&
             !HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method) && !HttpMethods.IsOptions(request.Method))

@@ -7,7 +7,7 @@ makes it start by itself.
 Publishes the server into -InstallDir together with a copy of the station UI, so the
 installed server depends on neither repository. Run it again after pulling changes: it
 stops the running copy, replaces the program and the UI, and starts it again. Settings,
-access keys, patient records and logs of the installed copy are kept.
+access keys, patient records, the recorded history and logs of the installed copy are kept.
 
 What is in the install folder:
 
@@ -16,7 +16,9 @@ What is in the install folder:
   appsettings.json               the settings from the repository (replaced by every run)
   appsettings.Production.json    the settings of this computer: access keys, UI folder,
                                  anything else that differs here. Written once, then kept.
-  data\patients.json             what stations have recorded about patients
+  data\patients.json             what stations have recorded about patients they did not admit
+  data\history.db                the patients stations admitted and their values, second by
+                                 second (SQLite; history.db-wal beside it belongs to it)
   logs\                          daily logs
 
 How it starts:

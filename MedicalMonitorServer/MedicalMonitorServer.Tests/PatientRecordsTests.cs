@@ -8,8 +8,10 @@ namespace MedicalMonitorServer.Tests;
 
 /// <summary>
 /// What a station entered about a patient must outlive a restart of the server, and a
-/// patient leaves the roster when - and only when - their monitor discharges them.
-/// A "restart" here is a new registry, bindings, pipeline and router over the same file.
+/// patient no station admitted leaves the roster when - and only when - their monitor
+/// discharges them. (A patient a station admitted is another matter: see
+/// RecordingLifecycleTests.) A "restart" here is a new registry, bindings, pipeline and
+/// router over the same file.
 /// </summary>
 public sealed class PatientRecordsTests : IDisposable
 {

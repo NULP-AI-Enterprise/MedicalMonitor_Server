@@ -99,6 +99,23 @@ public class ApiKeyMiddlewareTests
         Assert.True(await Passes(Request("GET", "/api/v1/monitors", "192.168.2.50")));
     }
 
+    [Theory]
+    [InlineData("/api/v1/history/patients")]
+    [InlineData("/api/v1/history/patients/0b9c5e2a-6d0f-4c56-9f0e-3a2f8f1d7c11")]
+    [InlineData("/api/v1/history/patients/0b9c5e2a-6d0f-4c56-9f0e-3a2f8f1d7c11/vitals")]
+    public async Task History_is_read_with_the_operator_key_or_from_this_machine(string path)
+    {
+        // It names every patient who was ever admitted: not for anybody on the ward network.
+        var refused = Request("GET", path, "192.168.2.50");
+        Assert.False(await Passes(refused));
+        Assert.Equal(StatusCodes.Status401Unauthorized, refused.Response.StatusCode);
+
+        Assert.True(await Passes(Request("GET", path, "192.168.2.50", key: OperatorKey)));
+        Assert.True(await Passes(Request("GET", path, "127.0.0.1", origin: "http://localhost:5230")));
+        Assert.False(await Passes(Request("GET", path, "192.168.2.50", key: IngestionKey)));
+        Assert.False(await Passes(Request("GET", path, "127.0.0.1", origin: "https://evil.example")));
+    }
+
     [Fact]
     public void Hub_trust_follows_the_same_rule()
     {
