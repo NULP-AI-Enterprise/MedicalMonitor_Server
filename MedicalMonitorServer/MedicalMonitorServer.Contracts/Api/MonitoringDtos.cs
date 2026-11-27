@@ -51,13 +51,25 @@ public record PatientInfoDto(
 /// "Mindray uMEC". Filled in by the endpoint that lists the monitors; null where it is not
 /// known.
 /// </param>
+/// <param name="CanStartNibp">
+/// True when a station may have this monitor start and stop a cuff measurement (POST
+/// /api/v1/patients/{patientId}/nibp/start and .../stop): a monitor whose driver can send the
+/// command, on a server where that was turned on. Filled in by the endpoint that lists the
+/// monitors; false everywhere else, and from a server that does not know the field.
+/// </param>
 public record MonitorBindingDto(
     string MonitorIp,
     int BedNumber,
     string? PatientId,
     string? ReportedPatientId,
     DateTimeOffset LastSeen,
-    string? Model = null);
+    string? Model = null,
+    bool CanStartNibp = false);
+
+/// <summary>The answer to an accepted request to start or stop a cuff measurement.</summary>
+/// <param name="MonitorIp">Monitor the command went to.</param>
+/// <param name="Action">"start" or "stop".</param>
+public record NibpRequestDto(string PatientId, string MonitorIp, string Action);
 
 /// <param name="Patient">The patient after the move (bed follows the monitor).</param>
 /// <param name="PreviousMonitorIp">Monitor the patient was on before; null if none.</param>
@@ -101,7 +113,17 @@ public enum DeviceAlarmLevel
 /// When the cuff reading was taken, as the monitor reports it; null when the monitor does not
 /// say. A cuff reading stands until the next one, so its age is part of the reading.
 /// </param>
-public record BloodPressureDto(int? Systolic, int? Diastolic, int? MeanArterialPressure, DateTimeOffset? MeasuredAt = null);
+/// <param name="Measuring">
+/// True while the monitor reports a cuff measurement running. The values that come with it are
+/// the reading before, if the monitor still shows one; the new ones follow when it ends. False
+/// from a monitor that does not report it. A station that does not know the field loses nothing.
+/// </param>
+public record BloodPressureDto(
+    int? Systolic,
+    int? Diastolic,
+    int? MeanArterialPressure,
+    DateTimeOffset? MeasuredAt = null,
+    bool Measuring = false);
 
 /// <summary>
 /// A measured value of the patient's monitor beyond the six every station has a place for:
@@ -186,12 +208,23 @@ public record MonitorUpdateDto(
 /// Stable key: "{patientId}:{vitalSign}" for alerts tied to a vital sign without a device code,
 /// "{patientId}:device:{code}" for device alarms.
 /// </param>
-/// <param name="VitalSign">Vital sign the alert is about; null for device alarms not tied to one (e.g. "lead off").</param>
+/// <param name="VitalSign">
+/// Vital sign the alert is about; null for a device alarm about something else (see
+/// <paramref name="Parameter"/>) or about no one value ("lead off"), and for a monitor that
+/// does not say which value its alarm is on.
+/// </param>
 /// <param name="Value">Measured value that breached the threshold; null when not applicable.</param>
 /// <param name="Source">Server threshold or monitor-reported alarm.</param>
 /// <param name="Code">Device alarm id as sent by the monitor (Mindray: 10002 = HR too low); null for threshold alerts.</param>
 /// <param name="Level">Device alarm priority as sent by the monitor; null for threshold alerts.</param>
 /// <param name="Category">Physiological or technical; null when unknown.</param>
+/// <param name="Parameter">
+/// The measured value a device alarm is about when it is not one of the six of
+/// <paramref name="VitalSign"/>: the <see cref="ParameterDto.Code"/> of that value ("art.sys",
+/// "cvp.mean", "temp.2", "ecg.st.ii", ...), "nibp.mean" for the mean cuff pressure or "pr" for
+/// the pulse rate. Null when <paramref name="VitalSign"/> says it, or the monitor does not.
+/// A station marks the value in alarm by it, as it does by <paramref name="VitalSign"/>.
+/// </param>
 public record AlertDto(
     string AlertId,
     string PatientId,
@@ -204,7 +237,8 @@ public record AlertDto(
     AlertSource Source = AlertSource.Threshold,
     int? Code = null,
     DeviceAlarmLevel? Level = null,
-    AlertCategory? Category = null)
+    AlertCategory? Category = null,
+    string? Parameter = null)
 {
     public static string BuildId(string patientId, VitalSignType vitalSign) => $"{patientId}:{vitalSign}";
 

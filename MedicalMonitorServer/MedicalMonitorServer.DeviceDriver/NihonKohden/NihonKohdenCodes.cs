@@ -44,6 +44,14 @@ internal static class NihonKohdenCodes
         ["009000"] = (170, "NIBP Systolic"),
         ["009001"] = (171, "NIBP Diastolic"),
         ["009002"] = (172, "NIBP Mean"),
+
+        // No pulse rate of the cuff: the BSM-3562 was not seen to send one. With a reading on it
+        // the monitor listed 009000-009002, 009008, 009010 and 009011 and nothing else of the
+        // cuff (captures of 2026-11-21 and 2026-11-26). 009009 in particular is not it: the
+        // parameter names of Nihon Kohden's central station software run "NIBP Meas Stat",
+        // "NIBP Cuff", "NIBP Meas Mode", "NIBP Cuff Size", which is 009008 to 009011 as they
+        // behave on the wire, so 009009 is the pressure in the cuff. That software has an
+        // "NIBP/PR" too; its code goes here the day a monitor is seen to send it.
         ["044000"] = (ServerParameterIds.ArtSystolic, "ART Systolic"),
         ["044001"] = (ServerParameterIds.ArtDiastolic, "ART Diastolic"),
         ["044002"] = (ServerParameterIds.ArtMean, "ART Mean"),
@@ -82,6 +90,9 @@ internal static class NihonKohdenCodes
 
     /// <summary>The monitor's name for a parameter; the code itself for one never seen named.</summary>
     public static string Label(string code) => Labels.TryGetValue(code, out var label) ? label : $"Parameter {code}";
+
+    /// <summary>Whether <see cref="Label"/> has a name for the code, and not just the code back.</summary>
+    public static bool IsNamed(string code) => Labels.ContainsKey(code);
 
     /// <summary>
     /// The sensor a parameter is measured by, as a technical alarm names it. One sensor feeds

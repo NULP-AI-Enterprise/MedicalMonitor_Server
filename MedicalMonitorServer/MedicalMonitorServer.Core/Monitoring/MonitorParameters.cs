@@ -42,6 +42,27 @@ public static class MonitorParameters
     };
 
     /// <summary>
+    /// What a device alarm on the value with this parameter id is about, for
+    /// <see cref="AlertDto.VitalSign"/> and <see cref="AlertDto.Parameter"/>: one of the six
+    /// vitals, or the key of another value. Both null when the monitor did not say which value
+    /// (no id) - the alert then stands on its text alone.
+    /// </summary>
+    public static (VitalSignType? Vital, string? Parameter) AlarmTarget(int? parameterId) => parameterId switch
+    {
+        null or <= 0 => (null, null),
+        101 => (VitalSignType.HeartRate, null),
+        151 => (VitalSignType.RespiratoryRate, null),
+        160 => (VitalSignType.SpO2, null),
+        170 => (VitalSignType.Systolic, null),
+        171 => (VitalSignType.Diastolic, null),
+        200 => (VitalSignType.Temperature, null),
+        // Shown with the six, but not one of them: there is no vital sign to name.
+        172 => (null, "nibp.mean"),
+        161 or 600 => (null, "pr"),
+        { } id => (null, CodeOf(id)),
+    };
+
+    /// <summary>
     /// The key a value of this parameter id is sent under; null for one of the six vitals and
     /// for a parameter without an id. A parameter the table does not know gets "p.{id}".
     /// </summary>

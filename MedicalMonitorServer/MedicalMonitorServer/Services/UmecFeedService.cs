@@ -133,7 +133,9 @@ public sealed class UmecFeedService : BackgroundService
             }
         }
 
-        var readings = oru is { Vitals.Count: > 0 } ? ToReadings(oru.Vitals, oru.VitalsAreComplete) : new VitalReadings();
+        var readings = oru is { Vitals.Count: > 0 }
+            ? ToReadings(oru.Vitals, oru.VitalsAreComplete, oru.NibpMeasuring)
+            : new VitalReadings();
 
         // Measured values only: a message that just says "no longer measured" is not data arriving.
         var hasReadings = readings.HasValues;
@@ -275,10 +277,13 @@ public sealed class UmecFeedService : BackgroundService
             _ => null,
         };
 
+        // Which value is in alarm, when the monitor says: a station marks that value with it.
+        var (vital, parameter) = MonitorParameters.AlarmTarget(alarm.ParameterId);
+
         return new AlertDto(
             AlertDto.BuildDeviceId(patientId, alarm.AlarmId),
             patientId,
-            VitalSign: null,
+            VitalSign: vital,
             AlertDto.SeverityOf(level),
             string.IsNullOrWhiteSpace(alarm.Text) ? $"Device alarm {alarm.AlarmId}" : alarm.Text,
             Value: null,
@@ -286,7 +291,8 @@ public sealed class UmecFeedService : BackgroundService
             Source: AlertSource.Device,
             Code: alarm.AlarmId,
             Level: level,
-            Category: category);
+            Category: category,
+            Parameter: parameter);
     }
 
     /// <summary>
@@ -300,7 +306,8 @@ public sealed class UmecFeedService : BackgroundService
     /// a Nihon Kohden when a measurement failed. What a uMec means by it has not been watched,
     /// so there the last reading stays, as it always did.
     /// </param>
-    private static VitalReadings ToReadings(IEnumerable<VitalSign> vitals, bool complete)
+    /// <param name="cuffMeasuring">The monitor says a cuff measurement is running (see <see cref="UmecVitalsMessage.NibpMeasuring"/>).</param>
+    private static VitalReadings ToReadings(IEnumerable<VitalSign> vitals, bool complete, bool cuffMeasuring = false)
     {
         var readings = new VitalReadings();
         Dictionary<string, ParameterDto>? parameters = null;
@@ -357,6 +364,7 @@ public sealed class UmecFeedService : BackgroundService
             Parameters = parameters,
             WithdrawnParameters = withdrawn,
             CuffWithdrawn = complete && cuffListedEmpty && !hasCuffValue,
+            NibpMeasuring = cuffMeasuring,
         };
     }
 }

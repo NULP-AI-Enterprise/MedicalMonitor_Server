@@ -75,6 +75,28 @@ public sealed class LsNetOptions
 
     /// <summary>Silence after which a monitor counts as disconnected (a packet comes every quarter second).</summary>
     public int StreamTimeoutMs { get; set; } = 5000;
+
+    /// <summary>
+    /// True (the default) asks every streaming monitor for its table of alarm limits, the one
+    /// request of a central station's that is sent. Nothing on the monitor is changed by it and
+    /// its stream is left as it is; turn it off if a monitor takes it badly. The limits a
+    /// monitor sends unasked after a change are read either way.
+    /// </summary>
+    public bool ReadAlarmLimits { get; set; } = true;
+
+    /// <summary>
+    /// How often the limits are asked for again. A change made on the monitor it reports by
+    /// itself, within a minute; asking again is what catches a report that got lost.
+    /// </summary>
+    public int AlarmLimitsIntervalMs { get; set; } = 10_000;
+
+    /// <summary>
+    /// True lets a station start and stop a cuff (NIBP) measurement on these monitors through
+    /// this server. False, the default: the command inflates a cuff on a patient at the word
+    /// of somebody who is not at the bedside, so it is for the people who run the ward to turn
+    /// on. The command is sent once for every request and never repeated by the server.
+    /// </summary>
+    public bool RemoteNibp { get; set; }
 }
 
 /// <summary>

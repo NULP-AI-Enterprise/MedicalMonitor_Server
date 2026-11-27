@@ -163,4 +163,76 @@ public class MonitorParametersTests
 
         Assert.Equal((120, taken), (replaced.Systolic, replaced.NibpMeasuredAt));
     }
+
+    [Fact]
+    public void A_cuff_measurement_under_way_is_what_the_latest_report_says()
+    {
+        var taken = new DateTimeOffset(2026, 11, 27, 10, 31, 0, TimeSpan.FromHours(2));
+        var snapshot = new VitalReadings(HeartRate: 80, Systolic: 117, Diastolic: 58, MeanArterialPressure: 77, NibpMeasuredAt: taken);
+
+        // The cuff is inflated: the reading before stands, and the station is told one is coming.
+        var during = snapshot.ReplaceRunning(new VitalReadings(HeartRate: 83, Systolic: 117, Diastolic: 58, MeanArterialPressure: 77, NibpMeasuredAt: taken, NibpMeasuring: true));
+        Assert.Equal(new BloodPressureDto(117, 58, 77, taken, Measuring: true), during.ToDto().Nibp);
+
+        // The next report no longer says so: it is over, whatever became of it.
+        var after = during.ReplaceRunning(new VitalReadings(HeartRate: 82));
+        Assert.False(after.NibpMeasuring);
+        Assert.Equal(new BloodPressureDto(117, 58, 77, taken), after.ToDto().Nibp);
+
+        // The same from a monitor that reports piecemeal, or a gateway.
+        Assert.True(snapshot.Merge(new VitalReadings(NibpMeasuring: true)).NibpMeasuring);
+        Assert.False(during.Merge(new VitalReadings(HeartRate: 84)).NibpMeasuring);
+    }
+
+    [Fact]
+    public void A_measurement_under_way_shows_with_no_reading_at_all()
+    {
+        // A first measurement, or one after a failed one: dashes for the values, and "measuring".
+        var dto = new VitalReadings().ReplaceRunning(new VitalReadings(HeartRate: 80, CuffWithdrawn: true, NibpMeasuring: true)).ToDto();
+
+        Assert.Equal(new BloodPressureDto(null, null, null, null, Measuring: true), dto.Nibp);
+    }
+
+    [Fact]
+    public void A_measurement_under_way_is_not_a_measured_value_and_survives_the_wire_form()
+    {
+        Assert.False(new VitalReadings(NibpMeasuring: true).HasValues);
+
+        var readings = VitalReadings.From(new VitalsDto(60, 98, new BloodPressureDto(120, 80, 93, null, Measuring: true), null, null, null));
+        Assert.True(readings.NibpMeasuring);
+        Assert.False(VitalReadings.From(new VitalsDto(60, 98, null, null, null, null)).NibpMeasuring);
+    }
+
+    [Fact]
+    public void A_device_alarm_on_one_of_the_six_vitals_names_the_vital()
+    {
+        Assert.Equal((VitalSignType.HeartRate, null), MonitorParameters.AlarmTarget(101));
+        Assert.Equal((VitalSignType.RespiratoryRate, null), MonitorParameters.AlarmTarget(151));
+        Assert.Equal((VitalSignType.SpO2, null), MonitorParameters.AlarmTarget(160));
+        Assert.Equal((VitalSignType.Systolic, null), MonitorParameters.AlarmTarget(170));
+        Assert.Equal((VitalSignType.Diastolic, null), MonitorParameters.AlarmTarget(171));
+        Assert.Equal((VitalSignType.Temperature, null), MonitorParameters.AlarmTarget(200));
+    }
+
+    [Fact]
+    public void A_device_alarm_on_any_other_value_names_it_by_its_key()
+    {
+        Assert.Equal((null, "art.sys"), MonitorParameters.AlarmTarget(ServerParameterIds.ArtSystolic));
+        Assert.Equal((null, "cvp.mean"), MonitorParameters.AlarmTarget(ServerParameterIds.CvpMean));
+        Assert.Equal((null, "temp.2"), MonitorParameters.AlarmTarget(201));
+        Assert.Equal((null, "ecg.st.ii"), MonitorParameters.AlarmTarget(106));
+
+        // Shown with the six vitals, but no vital sign of their own to name.
+        Assert.Equal((null, "nibp.mean"), MonitorParameters.AlarmTarget(172));
+        Assert.Equal((null, "pr"), MonitorParameters.AlarmTarget(161));
+        Assert.Equal((null, "pr"), MonitorParameters.AlarmTarget(600));
+    }
+
+    [Fact]
+    public void A_device_alarm_that_names_no_value_is_about_none()
+    {
+        // A uMec sends an alarm id and a text; so does anything that came without a parameter.
+        Assert.Equal((null, null), MonitorParameters.AlarmTarget(null));
+        Assert.Equal((null, null), MonitorParameters.AlarmTarget(0));
+    }
 }

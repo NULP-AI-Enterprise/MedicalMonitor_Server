@@ -18,12 +18,38 @@ namespace MedicalMonitorServer.DeviceDriver.NihonKohden.LsNet;
 /// A subscription lasts as long as the monitor keeps hearing our beacon; when its stream
 /// goes quiet all the same (monitor restarted, cable out) the request is simply repeated.
 /// </para>
+/// <para>
+/// Unless <see cref="LsNetOptions.ReadAlarmLimits"/> is turned off, a streaming monitor is also
+/// asked for its alarm limits now and then (<see cref="LsNetProtocol.LimitsQuery"/>); a change
+/// of them it reports by itself. Nothing else of what a central station asks its beds is
+/// sent: one of those requests takes the waveforms out of the stream.
+/// </para>
+/// <para>
+/// With <see cref="LsNetOptions.RemoteNibp"/> turned on, a station can also have a streaming
+/// monitor start a cuff measurement or stop the one that is running (<see cref="RequestCuff"/>).
+/// That is the one thing this driver changes on a monitor.
+/// </para>
 /// </summary>
-public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
+public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider, IRemoteCuff
 {
     private static readonly TimeSpan SubscribeRetry = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan StreamQuiet = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PatientQueryInterval = TimeSpan.FromSeconds(10);
+
+    // A second start this soon after one is not sent: the monitor has not had the time to
+    // report what it did with the first.
+    private static readonly TimeSpan CuffStartSpacing = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// How long the monitor is given to show in its reports what it did with a cuff command
+    /// before the log says that it did nothing. A start showed there after one to three
+    /// seconds, a stop after two.
+    /// </summary>
+    internal TimeSpan CuffAnswerWait { get; set; } = TimeSpan.FromSeconds(8);
+
+    // Reports in a row, one a second, that may come without any of the waveforms that were
+    // asked for and that the monitor says it can stream, before they are asked for again.
+    private const int ReportsWithoutWavesBeforeAsking = 3;
 
     // The alarm list is passed on when it changes, and this often regardless: a patient bound to
     // the monitor after the alarm started must get it too.
@@ -52,15 +78,28 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly Dictionary<IPAddress, Bed> _beds = new();
     private readonly object _sync = new();
+
+    // Cuff commands stations asked for, waiting for the run loop: it sends everything, so the
+    // sequence numbers and the transport stay in one hand.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(Bed Bed, bool Start)> _cuffRequests = new();
     private readonly IPAddress? _self;
     private readonly ushort[] _waveCodes;
     private ILsNetTransport? _transport;
     private ushort _sequence;
     private int _started;
 
-    /// <summary>What is known about one monitor. Touched by the run loop only, <see cref="State"/> aside.</summary>
+    /// <summary>
+    /// What is known about one monitor. Touched by the run loop only, <see cref="State"/> and
+    /// <see cref="LastCuffStart"/> aside.
+    /// </summary>
     private sealed class Bed
     {
+        /// <summary>When a station last had a start accepted, in ticks of the clock; set from request threads.</summary>
+        public long LastCuffStart = long.MinValue;
+
+        /// <summary>The cuff command that was sent and whose effect has not shown in a report yet.</summary>
+        public (bool Start, TimeSpan At, bool Acknowledged)? CuffAsked;
+
         public required DeviceState State { get; init; }
         public required IPAddress Address { get; init; }
         public required byte[] NodeId { get; set; }
@@ -82,6 +121,12 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         public string OfferedSignature = "";
         public Dictionary<ushort, LsNetNumeric> LastNumerics = new();
         public CuffClock Cuff = new();
+        public int ReportsWithoutWaves;
+        public TimeSpan LastLimitsQuery = TimeSpan.MinValue;
+        public IReadOnlyList<LsNetAlarmLimit>? Limits;
+        public string LimitsLogged = "";
+        public string LimitsPassedOn = "";
+        public ushort[] TemperatureCodes = Array.Empty<ushort>();
         public Dictionary<ushort, (short Min, short Max)> WaveRanges = new();
         public TimeSpan LastWaveRanges = TimeSpan.MinValue;
     }
@@ -166,10 +211,60 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         }
 
         _logger.LogInformation(
-            "LS-NET: announcing this PC as {Kind} \"{BedName}\" from {LocalIp}; reading {Count} monitor(s), waveforms {Waves}.",
-            _options.AnnounceAsBed ? "bed" : "node", _options.BedName, _self, _beds.Count, string.Join(", ", _waveCodes.Select(c => c.ToString("X4", CultureInfo.InvariantCulture))));
+            "LS-NET: announcing this PC as {Kind} \"{BedName}\" from {LocalIp}; reading {Count} monitor(s), waveforms {Waves}{Limits}{Cuff}.",
+            _options.AnnounceAsBed ? "bed" : "node", _options.BedName, _self, _beds.Count, string.Join(", ", _waveCodes.Select(c => c.ToString("X4", CultureInfo.InvariantCulture))),
+            _options.ReadAlarmLimits ? ", and their alarm limits" : "",
+            _options.RemoteNibp ? "; stations may start and stop a cuff measurement on them" : "");
 
         _ = RunAsync(_transport, _stopping.Token);
+    }
+
+    /// <summary>
+    /// True for a monitor this driver reads, once <see cref="LsNetOptions.RemoteNibp"/> allows it
+    /// and the driver is on the network. Says nothing of whether the monitor is streaming now.
+    /// </summary>
+    public bool CanControlCuff(string monitorIp) =>
+        _options.RemoteNibp && _self is not null
+        && IPAddress.TryParse(monitorIp, out var address) && _beds.ContainsKey(address);
+
+    /// <summary>
+    /// Has the monitor start a cuff measurement, or stop the one that is running. The command
+    /// goes out from the run loop within a tenth of a second and is never repeated: what the
+    /// monitor made of it is in its reports (<see cref="UmecVitalsMessage.NibpMeasuring"/>)
+    /// and, one line each, in the log.
+    /// <para>
+    /// A start is refused while the monitor reports a measurement running, and for a few
+    /// seconds after another start. A stop is always passed on: it is the safe direction.
+    /// </para>
+    /// </summary>
+    public CuffRequestStatus RequestCuff(string monitorIp, bool start)
+    {
+        if (!IPAddress.TryParse(monitorIp, out var address) || !_beds.TryGetValue(address, out var bed))
+        {
+            return CuffRequestStatus.NotSupported;
+        }
+
+        if (!_options.RemoteNibp) return CuffRequestStatus.NotAllowed;
+
+        bool up;
+        lock (_sync) { up = bed.Up; }
+        if (!up) return CuffRequestStatus.NotStreaming;
+
+        if (start)
+        {
+            // What the last report said, a second old at most.
+            if (bed.Cuff.Measuring) return CuffRequestStatus.AlreadyMeasuring;
+
+            long now = _clock.Elapsed.Ticks;
+            long last = Interlocked.Read(ref bed.LastCuffStart);
+            if (last != long.MinValue && now - last < CuffStartSpacing.Ticks) return CuffRequestStatus.TooSoon;
+
+            // Two stations at the same instant: one start goes out, the other came too soon.
+            if (Interlocked.CompareExchange(ref bed.LastCuffStart, now, last) != last) return CuffRequestStatus.TooSoon;
+        }
+
+        _cuffRequests.Enqueue((bed, start));
+        return CuffRequestStatus.Accepted;
     }
 
     /// <summary>Nothing to do: the watchdog's finds are uMec monitors, ours come from configuration.</summary>
@@ -209,6 +304,8 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
                     transport.Broadcast(beacon);
                     nextBeacon = now + beaconEvery;
                 }
+
+                while (_cuffRequests.TryDequeue(out var request)) SendCuffControl(transport, request.Bed, request.Start);
 
                 foreach (var bed in _beds.Values) Maintain(transport, bed, now);
 
@@ -254,12 +351,87 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
             transport.Send(LsNetProtocol.PatientQuery(++_sequence, bed.NodeId, _self!), bed.Address);
             bed.LastPatientQuery = now;
         }
+
+        // Only a monitor that is streaming: one that is off or away is asked for its stream
+        // alone, and for the rest when it is back.
+        if (_options.ReadAlarmLimits && bed.Up
+            && (bed.LastLimitsQuery == TimeSpan.MinValue || now - bed.LastLimitsQuery >= TimeSpan.FromMilliseconds(Math.Max(1000, _options.AlarmLimitsIntervalMs))))
+        {
+            transport.Send(LsNetProtocol.LimitsQuery(++_sequence, bed.NodeId, _self!), bed.Address);
+            bed.LastLimitsQuery = now;
+        }
+
+        // The stream is there but empty of what was asked for (see OnStream): ask again. Not
+        // more often than the subscription is repeated to a monitor that is silent. It may be
+        // the first time of asking: a monitor goes on streaming to this address for some
+        // seconds after a server that was reading it stopped, and the one started in its place
+        // then finds a stream it never asked for.
+        if (bed.Up && bed.ReportsWithoutWaves >= ReportsWithoutWavesBeforeAsking
+            && (bed.LastSubscribe == TimeSpan.MinValue || now - bed.LastSubscribe >= SubscribeRetry))
+        {
+            _logger.LogWarning(
+                "Nihon Kohden monitor {Ip} is streaming without the waveforms it offers; asking for them again.",
+                bed.State.IpAddress);
+            transport.Send(LsNetProtocol.Subscribe(++_sequence, bed.NodeId, _self!, _waveCodes), bed.Address);
+            bed.LastSubscribe = now;
+            bed.ReportsWithoutWaves = 0;
+        }
+
+        // A cuff command whose effect never showed. Said once, and left at that: a command
+        // that inflates a cuff is not sent a second time on the server's own initiative.
+        if (bed.CuffAsked is { } asked && now - asked.At > CuffAnswerWait)
+        {
+            _logger.LogWarning(
+                "Nihon Kohden monitor {Ip} was told to {What} a cuff measurement {Seconds:0} s ago and its reports do not show it; " +
+                "the monitor {Acknowledged} the command. It is not repeated.",
+                bed.State.IpAddress, asked.Start ? "start" : "stop", (now - asked.At).TotalSeconds,
+                asked.Acknowledged ? "acknowledged" : "did not acknowledge");
+            bed.CuffAsked = null;
+        }
+    }
+
+    /// <summary>
+    /// Sends one cuff command a station asked for. From the run loop, and once: there is no
+    /// retry behind it, whatever the monitor does.
+    /// </summary>
+    private void SendCuffControl(ILsNetTransport transport, Bed bed, bool start)
+    {
+        string what = start ? "start" : "stop";
+        if (!bed.Up)
+        {
+            _logger.LogWarning(
+                "Nihon Kohden monitor {Ip} stopped streaming before it could be told to {What} a cuff measurement; nothing was sent.",
+                bed.State.IpAddress, what);
+            return;
+        }
+
+        transport.Send(LsNetProtocol.CuffControl(start, ++_sequence, bed.NodeId, _self!), bed.Address);
+        bed.CuffAsked = (start, _clock.Elapsed, false);
+        _logger.LogInformation("Nihon Kohden monitor {Ip} was told to {What} a cuff measurement.", bed.State.IpAddress, what);
+    }
+
+    /// <summary>
+    /// The monitor says where its cuff control stands - every second while a measurement is
+    /// starting, whoever started it. Worth a line only as the answer to a command sent from
+    /// here, and once.
+    /// </summary>
+    private void OnCuffPush(Bed bed, bool started)
+    {
+        if (bed.CuffAsked is not { } asked || asked.Acknowledged || asked.Start != started) return;
+
+        bed.CuffAsked = (asked.Start, asked.At, true);
+        _logger.LogInformation(
+            "Nihon Kohden monitor {Ip} acknowledged the {What} of a cuff measurement after {Milliseconds:0} ms.",
+            bed.State.IpAddress, started ? "start" : "stop", (_clock.Elapsed - asked.At).TotalMilliseconds);
     }
 
     private void Handle(ILsNetTransport transport, LsNetReceived received)
     {
         if (!_beds.TryGetValue(received.From, out var bed)) return;
         if (LsNetProtocol.Parse(received.Data) is not { } datagram) return;
+
+        // Asked for (an answer) or sent after a change on the monitor (a push): the same table.
+        if (datagram.AlarmLimits is { } limits) OnAlarmLimits(bed, limits);
 
         switch (datagram.Kind)
         {
@@ -283,6 +455,10 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
 
                 bed.PatientId = datagram.PatientId;
                 bed.PatientKnown = true;
+                break;
+
+            case LsNetKind.Push when datagram.CuffStarted is { } started:
+                OnCuffPush(bed, started);
                 break;
 
             case LsNetKind.Waveforms:
@@ -331,9 +507,44 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
 
         if (datagram.Numerics is { } numerics)
         {
+            // A report rides behind the samples of its packet. One that comes without any,
+            // from a monitor that says it can stream a waveform we asked for, is a stream that
+            // has lost its selection: the monitor does that to a node that sends it a central
+            // station's "monitor this bed" (seen 2026-11-27), and goes on sending the values.
+            // Nothing puts the waveforms back but asking again, which Maintain then does.
+            bool emptied = datagram.Kind == LsNetKind.Waveforms && datagram.Waves.Count == 0
+                           && _waveCodes.Any(code => datagram.OfferedWaves.Contains(code));
+            bed.ReportsWithoutWaves = emptied ? bed.ReportsWithoutWaves + 1 : 0;
+
             AddVitals(oru, numerics, CuffTakenAt(bed, numerics));
+
+            // After CuffTakenAt, which is what watches the cuff. While this is set, the cuff
+            // values in the report are the reading before, or none: a station shows that a
+            // new one is on its way instead of a reading gone missing.
+            oru.NibpMeasuring = bed.Cuff.Measuring;
+
+            // The effect of a cuff command sent from here shows in a report, and only there.
+            if (bed.CuffAsked is { } asked && bed.Cuff.Measuring == asked.Start)
+            {
+                _logger.LogInformation(
+                    "Nihon Kohden monitor {Ip} reports {State} {Milliseconds:0} ms after it was told to {What}.",
+                    bed.State.IpAddress,
+                    asked.Start ? "a cuff measurement running" : "no cuff measurement running",
+                    (_clock.Elapsed - asked.At).TotalMilliseconds,
+                    asked.Start ? "start one" : "stop it");
+                bed.CuffAsked = null;
+            }
+
             LogParameters(bed, numerics);
             LogChanges(bed, datagram);
+
+            // Which temperature is the first and which the second is the order of this list;
+            // the limits of a temperature are passed on under the same number.
+            bed.TemperatureCodes = numerics
+                .Where(n => NihonKohdenCodes.IsTemperature(NihonKohdenCodes.FromBytes((byte)(n.Code >> 8), (byte)n.Code)))
+                .Select(n => n.Code)
+                .ToArray();
+            PassOnAlarmLimits(bed);
 
             // The block is the monitor's whole list: a sensor that came off is either gone from
             // it or there without a value, and the station must stop showing its last number.
@@ -455,16 +666,23 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
     private void PassOnAlarms(Bed bed, IReadOnlyList<LsNetNumeric> numerics)
     {
         var oru = new UmecVitalsMessage();
+        int temperatures = 0;
         foreach (var numeric in numerics)
         {
+            var code = NihonKohdenCodes.FromBytes((byte)(numeric.Code >> 8), (byte)numeric.Code);
+
+            // For every record, in alarm or not: it is what numbers the temperatures.
+            int? parameterId = TryTarget(code, ref temperatures, out var target) ? target.ParameterId : null;
+
             if (numeric.Alarm == LsNetAlarm.None || numeric.Code == DuplicatePulseRate) continue;
 
-            var code = NihonKohdenCodes.FromBytes((byte)(numeric.Code >> 8), (byte)numeric.Code);
             oru.Alarms.Add(new ActiveAlarm
             {
                 Category = AlarmCategory.Physiological,
                 TypeCode = 1,
                 AlarmId = numeric.Code,
+                // The alarm is on the record of a value: the station marks that value with it.
+                ParameterId = parameterId,
                 // The monitor says the value has crossed one of its limits, not which one.
                 Text = $"{NihonKohdenCodes.Label(code)} out of limits",
                 LevelCode = numeric.Alarm,
@@ -659,17 +877,7 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         foreach (var numeric in numerics)
         {
             var code = NihonKohdenCodes.FromBytes((byte)(numeric.Code >> 8), (byte)numeric.Code);
-
-            (int ParameterId, string Name) target;
-            if (NihonKohdenCodes.IsTemperature(code))
-            {
-                if (temperatures >= NihonKohdenCodes.Temperatures.Length) continue;
-                target = NihonKohdenCodes.Temperatures[temperatures++];
-            }
-            else if (!NihonKohdenCodes.TryGetParameter(code, out target))
-            {
-                continue;
-            }
+            if (!TryTarget(code, ref temperatures, out var target)) continue;
 
             double? value = numeric.Value is int raw ? Math.Round(raw * NihonKohdenCodes.LsNetScale(code), 2) : null;
             var vital = new VitalSign
@@ -697,6 +905,114 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         }
     }
 
+    /// <summary>
+    /// The parameter id a value of this code is read under, false for one that is not passed
+    /// on. The monitor has a code per temperature site, so the temperatures of a report are
+    /// numbered in the order they come: <paramref name="temperatures"/> counts them, and has
+    /// to see every record of the report in turn.
+    /// </summary>
+    private static bool TryTarget(string code, ref int temperatures, out (int ParameterId, string Name) target)
+    {
+        if (!NihonKohdenCodes.IsTemperature(code)) return NihonKohdenCodes.TryGetParameter(code, out target);
+
+        if (temperatures >= NihonKohdenCodes.Temperatures.Length)
+        {
+            target = default;
+            return false;
+        }
+
+        target = NihonKohdenCodes.Temperatures[temperatures++];
+        return true;
+    }
+
+    /// <summary>
+    /// The monitor's table of alarm limits has come: kept, and its limits written to the log
+    /// when they are not the ones logged before. The table names every parameter the monitor
+    /// could measure; only those with a limit switched on are worth a line.
+    /// </summary>
+    private void OnAlarmLimits(Bed bed, IReadOnlyList<LsNetAlarmLimit> limits)
+    {
+        bed.Limits = limits;
+
+        static string Code(LsNetAlarmLimit l) => NihonKohdenCodes.FromBytes((byte)(l.Code >> 8), (byte)l.Code);
+        static string Show(LsNetAlarmLimit l)
+        {
+            var code = Code(l);
+            double scale = NihonKohdenCodes.LsNetScale(code);
+            string At(int? raw) => raw is int value ? (value * scale).ToString("0.##", CultureInfo.InvariantCulture) : "";
+
+            // Known parameters by the monitor's name for them, the rest by their code.
+            return $"{(NihonKohdenCodes.IsNamed(code) ? NihonKohdenCodes.Label(code) : code)} {At(l.Lower)}..{At(l.Upper)}";
+        }
+
+        var set = limits.Where(l => l.Upper is not null || l.Lower is not null).ToList();
+        var logged = string.Join(", ", set.Select(Show));
+        if (logged != bed.LimitsLogged)
+        {
+            bed.LimitsLogged = logged;
+            _logger.LogInformation(
+                "Nihon Kohden monitor {Ip} alarm limits, lower..upper: [{Limits}]; {Off} more parameters have none set.",
+                bed.State.IpAddress, logged, limits.Count - set.Count);
+        }
+
+        PassOnAlarmLimits(bed);
+    }
+
+    /// <summary>
+    /// Hands the limits of the values that are passed on to the feed, as the alarm settings of
+    /// their parameters, when they differ from what was handed over last. A limit is in the
+    /// units of its value. Called for every table and every report: which temperature is the
+    /// first is only known from a report.
+    /// </summary>
+    private void PassOnAlarmLimits(Bed bed)
+    {
+        if (bed.Limits is not { } limits) return;
+
+        var oru = new UmecVitalsMessage();
+        foreach (var limit in limits)
+        {
+            var code = NihonKohdenCodes.FromBytes((byte)(limit.Code >> 8), (byte)limit.Code);
+
+            (int ParameterId, string Name) target;
+            if (NihonKohdenCodes.IsTemperature(code))
+            {
+                int site = Array.IndexOf(bed.TemperatureCodes, limit.Code);
+                if (site < 0 || site >= NihonKohdenCodes.Temperatures.Length) continue;
+                target = NihonKohdenCodes.Temperatures[site];
+            }
+            else if (!NihonKohdenCodes.TryGetParameter(code, out target))
+            {
+                continue;
+            }
+
+            // Two codes can be read under one id (see AddVitals): one setting each, the first.
+            if (oru.AlarmSettings.Any(s => s.ParameterId == target.ParameterId)) continue;
+
+            double scale = NihonKohdenCodes.LsNetScale(code);
+            oru.AlarmSettings.Add(new AlarmSetting
+            {
+                ParameterId = target.ParameterId,
+                ParameterName = target.Name,
+                HighLimit = limit.Upper is int upper ? Math.Round(upper * scale, 2) : null,
+                LowLimit = limit.Lower is int lower ? Math.Round(lower * scale, 2) : null,
+            });
+        }
+
+        var signature = string.Join(",", oru.AlarmSettings.Select(s =>
+            string.Create(CultureInfo.InvariantCulture, $"{s.ParameterId}:{s.LowLimit}:{s.HighLimit}")));
+        if (signature == bed.LimitsPassedOn) return;
+        bed.LimitsPassedOn = signature;
+
+        OnMessageReceived?.Invoke(new UmecMessage
+        {
+            Kind = UmecMessageKind.AlarmLimits,
+            MessageType = "LS-NET",
+            ReceivedAt = DateTime.Now,
+            SourceIp = bed.State.IpAddress,
+            Oru = oru,
+        });
+    }
+
     private void MarkUp(Bed bed)
     {
         lock (_sync)
@@ -707,6 +1023,11 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
 
         bed.LastSequence = -1;
         bed.LastPatientQuery = TimeSpan.MinValue;
+        bed.LastLimitsQuery = TimeSpan.MinValue;
+        bed.ReportsWithoutWaves = 0;
+        bed.Limits = null;
+        bed.LimitsLogged = "";
+        bed.LimitsPassedOn = "";
         bed.LastAlarms = TimeSpan.MinValue;
         bed.LastTechnical = TimeSpan.MinValue;
         bed.ParameterSignature = "";
@@ -726,6 +1047,7 @@ public sealed class NihonKohdenLsNetProvider : IDeviceDataProvider
         }
 
         bed.PatientKnown = false;
+        bed.CuffAsked = null;
         _logger.LogWarning("Nihon Kohden monitor {Ip} stopped streaming over LS-NET ({Reason}); asking again.", bed.State.IpAddress, reason);
         OnDeviceDisconnected?.Invoke(this, bed.State);
     }

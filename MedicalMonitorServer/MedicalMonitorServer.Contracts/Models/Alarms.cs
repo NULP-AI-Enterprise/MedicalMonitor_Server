@@ -59,6 +59,13 @@ public sealed class ActiveAlarm
     /// <summary>Mindray alarm id (first component of OBX-5), e.g. 10002 = HR too low.</summary>
     public int AlarmId { get; set; }
 
+    /// <summary>
+    /// The measured value the alarm is about, as its <see cref="VitalSign.ParameterId"/>, when
+    /// the monitor says which: a Nihon Kohden puts a limit alarm on the value itself. Null when
+    /// it does not (a uMec sends an alarm id and a text), and for an alarm about no one value.
+    /// </summary>
+    public int? ParameterId { get; set; }
+
     /// <summary>Alarm text as shown on the monitor, priority asterisks removed.</summary>
     public string Text { get; set; } = "";
 

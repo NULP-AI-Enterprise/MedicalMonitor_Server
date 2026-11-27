@@ -22,9 +22,28 @@ internal enum LsNetKind
     /// <summary>Numeric values on their own (02 12), what a numerics-only subscription gets.</summary>
     Numerics,
 
+    /// <summary>
+    /// Settings the monitor sends unasked after they were changed on it (kind 01 0x): its alarm
+    /// limits as type 0303, some seconds to a minute after the change. Each is sent once, under
+    /// a sequence number of its own, and was never repeated for want of an answer. Type 0403
+    /// is of this kind too: the state of the cuff's measure control, once a second while a
+    /// measurement runs.
+    /// </summary>
+    Push,
+
     /// <summary>Anything else: requests from another node, acknowledgements.</summary>
     Other,
 }
+
+/// <summary>
+/// The alarm limits the monitor has set for one parameter, one record of its limit table.
+/// The table names a parameter by the code its value comes under (0x0100 heart rate, 0x0700
+/// SpO2, 0x0900 the systolic cuff pressure) and counts in the units of that value.
+/// </summary>
+/// <param name="Code">Parameter code, as in <see cref="LsNetNumeric.Code"/>.</param>
+/// <param name="Upper">Upper limit as sent; null when it is switched off or the parameter has none.</param>
+/// <param name="Lower">Lower limit as sent; null when it is switched off or the parameter has none.</param>
+internal readonly record struct LsNetAlarmLimit(ushort Code, int? Upper, int? Lower);
 
 /// <param name="Code">Nihon Kohden parameter code as its two wire bytes, high first (0x0700 = SpO2).</param>
 /// <param name="Value">Whole number as sent; null when the monitor has no value (0x8000).</param>
@@ -117,6 +136,21 @@ internal sealed class LsNetDatagram
 
     /// <summary>With <see cref="Numerics"/>: the waveform codes the monitor can stream right now.</summary>
     public IReadOnlyList<ushort> OfferedWaves { get; init; } = Array.Empty<ushort>();
+
+    /// <summary>
+    /// The monitor's whole table of alarm limits: in the answer to the limits request (type
+    /// 0302) and in the push that follows a change on the monitor (type 0303). Null in any
+    /// other datagram, and in one of these whose layout is not the one that was seen.
+    /// </summary>
+    public IReadOnlyList<LsNetAlarmLimit>? AlarmLimits { get; init; }
+
+    /// <summary>
+    /// A push of type 0403 that carries the cuff's measure control: true when the monitor says
+    /// a measurement has been started, false when it says it was stopped. It sends this once a
+    /// second while the cuff is at work, whoever started it, and it is how it answers
+    /// <see cref="LsNetProtocol.CuffControl"/>. Null in any other datagram.
+    /// </summary>
+    public bool? CuffStarted { get; init; }
 }
 
 /// <summary>
@@ -128,7 +162,7 @@ internal sealed class LsNetDatagram
 /// Everything is UDP. Control datagrams go to port 8300 from port 55405, in both directions;
 /// the streams a viewer subscribes to arrive on its port 8301. A control datagram is
 /// <code>
-/// 0-1   kind: 00 0x request, 02 0x response, 04 FF beacon, 05 FF notification, 06 FF bare ack
+/// 0-1   kind: 00 0x request, 01 0x push, 02 0x response, 04 FF beacon, 05 FF notification, 06 FF bare ack
 /// 2-3   sequence number (a response repeats the request's)
 /// 4-5   length of the whole datagram
 /// 6-11  00 01 00 01 00 00
@@ -153,6 +187,29 @@ internal static class LsNetProtocol
 
     public const ushort SubscribeType = 0x0222;
     public const ushort PatientType = 0x0308;
+
+    /// <summary>Request for the table of alarm limits; answered with type 0302.</summary>
+    public const ushort LimitsType = 0x0301;
+
+    /// <summary>The table of alarm limits sent unasked after a change on the monitor.</summary>
+    public const ushort LimitsPushType = 0x0303;
+
+    /// <summary>
+    /// "Set a parameter of the bed" (RemParamSet in Nihon Kohden's station software). Sent to
+    /// the monitor it changes the parameter; sent by the monitor it reports one that changed.
+    /// </summary>
+    public const ushort RemoteParameterType = 0x0403;
+
+    /// <summary>
+    /// The one record of a 0403 that is used here: the count (one record), a zero, parameter
+    /// 0303 - the cuff's measure control -, a zero, the length of its value (two bytes), and
+    /// then the value, 1 to start a measurement and 0 to stop it.
+    /// </summary>
+    private static readonly byte[] CuffControlRecord = { 0x01, 0x00, 0x03, 0x03, 0x00, 0x02 };
+
+    /// <summary>"Switched off" in a limit record; 0x7FFF stands where a parameter has no such limit.</summary>
+    private const ushort LimitOff = 0x8000;
+    private const ushort LimitNone = 0x7FFF;
 
     /// <summary>Last byte of the node id of a bedside monitor.</summary>
     private const byte BedNode = 0x20;
@@ -239,10 +296,59 @@ internal static class LsNetProtocol
     public static byte[] PatientQuery(ushort sequence, byte[] targetId, IPAddress self) =>
         Request(PatientType, sequence, targetId, self, Array.Empty<byte>(), kindLow: 0x01);
 
-    private static byte[] Request(ushort type, ushort sequence, byte[] targetId, IPAddress self, byte[] payload, byte kindLow = 0x00)
+    /// <summary>
+    /// Request 0301: the table of alarm limits. Answered with type 0302, see <see cref="ParseLimits"/>.
+    /// <para>
+    /// It is one of the seven requests Nihon Kohden's central station software (CNS-9101) polls
+    /// each of its beds with, and the only one of them sent here; its payload, 02 and three
+    /// zeros, is the station's. The monitor answers it from any node it streams to. The other
+    /// six are left alone on purpose. 0308, 0304, 0404, 0401 and 0320 bring nothing that is
+    /// read. And 0206, "monitor this bed", must not be sent: on 2026-11-27 the BSM-3562 went on
+    /// streaming to the node that sent it, four packets a second as before, but without a
+    /// single waveform in them, and the waveforms did not come back until they were asked for
+    /// again (captures/nihon-kohden-central-2026-11-27).
+    /// </para>
+    /// </summary>
+    public static byte[] LimitsQuery(ushort sequence, byte[] targetId, IPAddress self) =>
+        Request(LimitsType, sequence, targetId, self, new byte[] { 0x02, 0, 0, 0 }, kindLow: 0x01);
+
+    /// <summary>
+    /// The command that starts a cuff measurement on the monitor, or stops the one that is
+    /// running: type 0403 with the one record of <see cref="CuffControlRecord"/>. It goes out
+    /// as kind 01 00, the kind of the monitor's own pushes, not as a request, and there is no
+    /// answer of a type of its own: the monitor pushes the same record back.
+    /// <para>
+    /// The monitor takes it from the node it is streaming to - the 04 that opens the payload of
+    /// <see cref="Subscribe"/> is the role of the bed's host in the station software. The
+    /// record and the parameter were read out of that software (CNS-9101); the start was then
+    /// sent to a BSM-3562 on 2026-11-27 from a node subscribed like this driver
+    /// (captures/nihon-kohden-nibp-2026-11-27): 156 ms later the monitor pushed the record
+    /// back, went on doing so once a second, and its reports showed the cuff measuring.
+    /// </para>
+    /// <para>
+    /// Both were then sent by this driver itself, the same day, half a minute after its one
+    /// subscription. The start was pushed back after 74 ms and the report showed the cuff
+    /// measuring a second after the command; the stop, sent six seconds into the measurement,
+    /// was pushed back with the value 0 after 113 ms, and two seconds after it the report
+    /// showed the cuff at rest. With no cuff on the monitor, the measurement that was left
+    /// alone that morning went on for more than forty seconds and ended in a technical alarm;
+    /// this one ended without one.
+    /// </para>
+    /// </summary>
+    public static byte[] CuffControl(bool start, ushort sequence, byte[] targetId, IPAddress self)
+    {
+        var payload = new byte[CuffControlRecord.Length + 2];
+        CuffControlRecord.CopyTo(payload, 0);
+        payload[CuffControlRecord.Length] = (byte)(start ? 0x01 : 0x00);
+        return Request(RemoteParameterType, sequence, targetId, self, payload, kindHigh: 0x01);
+    }
+
+    private static byte[] Request(
+        ushort type, ushort sequence, byte[] targetId, IPAddress self, byte[] payload, byte kindLow = 0x00, byte kindHigh = 0x00)
     {
         int length = 32 + payload.Length;
         var b = new byte[length];
+        b[0] = kindHigh;
         b[1] = kindLow;
         BinaryPrimitives.WriteUInt16BigEndian(b.AsSpan(2), sequence);
         BinaryPrimitives.WriteUInt16BigEndian(b.AsSpan(4), (ushort)length);
@@ -297,6 +403,17 @@ internal static class LsNetProtocol
                     PatientId = type == PatientType + 1 && d.Length >= PatientIdOffset + PatientIdLength
                         ? Text(d.Slice(PatientIdOffset, PatientIdLength))
                         : "",
+                    AlarmLimits = type == LimitsType + 1 ? ParseLimits(d) : null,
+                };
+
+            case 0x01:
+                return new LsNetDatagram
+                {
+                    Kind = LsNetKind.Push,
+                    Type = type,
+                    Sequence = sequence,
+                    AlarmLimits = type == LimitsPushType ? ParseLimits(d) : null,
+                    CuffStarted = type == RemoteParameterType ? ParseCuffControl(d) : null,
                 };
 
             case 0x05:
@@ -317,10 +434,13 @@ internal static class LsNetProtocol
     /// 36-   the blocks: code (2), 08, number of samples, then the samples, signed 16-bit big endian
     /// </code>
     /// Null for anything that does not fit this exactly: a trace is not drawn from a layout nobody has seen.
+    /// A packet can have no block at all - 36 bytes, or the numeric block alone: what the monitor
+    /// streams to a node that has no waveform selected. It is a packet of the stream like any
+    /// other, with its place in the sequence.
     /// </summary>
     private static LsNetDatagram? ParseWaveforms(ReadOnlySpan<byte> d)
     {
-        if (d.Length < 40) return null;
+        if (d.Length < 36) return null;
 
         int blocks = d[22];
         var waves = new List<LsNetWave>(blocks);
@@ -408,6 +528,57 @@ internal static class LsNetProtocol
         }
 
         return numerics;
+    }
+
+    /// <summary>
+    /// The table of alarm limits, the body of types 0302 and 0303: a count and a zero byte, then
+    /// that many 6-byte records - parameter code (2), upper limit (2), lower limit (2), big
+    /// endian. A BSM-3562 sends 100 records, one for every parameter it could measure, in 634
+    /// bytes. The codes are those of the values: while the SpO2 lower limit was moved on the
+    /// monitor to 99, to 82 and back to 99 (2026-11-21, capture 06), the record of code 0700
+    /// said so each time and the SpO2 value of 98 went into alarm, out and in again; an upper
+    /// limit of 64 in the record of 0100 had the pulse rate of 80 in alarm.
+    /// Null unless the records end exactly where the datagram does.
+    /// </summary>
+    private static List<LsNetAlarmLimit>? ParseLimits(ReadOnlySpan<byte> d)
+    {
+        const int countAt = 32, recordsAt = 34, recordLength = 6;
+        if (d.Length < recordsAt || d[countAt + 1] != 0) return null;
+
+        int count = d[countAt];
+        if (recordsAt + recordLength * count != d.Length) return null;
+
+        static int? Limit(ushort raw) => raw is LimitOff or LimitNone ? null : (short)raw;
+
+        var limits = new List<LsNetAlarmLimit>(count);
+        for (int i = 0; i < count; i++)
+        {
+            var record = d.Slice(recordsAt + recordLength * i, recordLength);
+            limits.Add(new LsNetAlarmLimit(
+                BinaryPrimitives.ReadUInt16BigEndian(record),
+                Limit(BinaryPrimitives.ReadUInt16BigEndian(record[2..])),
+                Limit(BinaryPrimitives.ReadUInt16BigEndian(record[4..]))));
+        }
+
+        return limits;
+    }
+
+    /// <summary>
+    /// What a 0403 says about the cuff: true or false for the value of the measure control when
+    /// the datagram is that one record and nothing else, as the monitor sends it; null for a
+    /// 0403 about anything else. A value other than 0 and 1 has not been seen and is not read.
+    /// </summary>
+    private static bool? ParseCuffControl(ReadOnlySpan<byte> d)
+    {
+        if (d.Length != 32 + CuffControlRecord.Length + 2) return null;
+        if (!d.Slice(32, CuffControlRecord.Length).SequenceEqual(CuffControlRecord)) return null;
+
+        return (d[38], d[39]) switch
+        {
+            (0x01, 0x00) => true,
+            (0x00, 0x00) => false,
+            _ => null,
+        };
     }
 
     /// <summary>NUL-padded ASCII; "" when it holds anything that is not printable.</summary>
