@@ -217,4 +217,124 @@ public class MonitorBindingsTests
         Assert.Equal("", all[0].ReportedPatientId);
         Assert.Null(all[0].PatientId);
     }
+
+    // ------------------------------------------------------------ a patient a station admitted is held
+
+    private const string Admitted = "0b9c5e2a-6d0f-4c56-9f0e-3a2f8f1d7c11";
+
+    [Fact]
+    public void Hold_ReplacesWhoeverStoodInOnTheMonitor()
+    {
+        var anonymous = Vitals(M1).PatientId!;
+
+        var change = _bindings.Hold(Admitted, M1, 0, Now);
+
+        Assert.Equal(new BindingChange(M1, Admitted, false, anonymous, null, null, 0), change);
+        Assert.Equal(Admitted, Vitals(M1).PatientId);
+    }
+
+    [Fact]
+    public void Hold_KeepsPatient_WhenMonitorReportsAnotherId()
+    {
+        Info(M1, "P1");
+        Assert.Equal("P1", _bindings.Hold(Admitted, M1, 0, Now)!.UnboundPatientId);
+
+        var result = Info(M1, "P2");
+
+        Assert.Equal(Admitted, result.PatientId);
+        Assert.Null(result.Change);
+        Assert.Equal(new ReportedIdChange("P1", "P2"), result.Renamed);
+        Assert.Equal(Admitted, Vitals(M1).PatientId);
+        Assert.Null(Vitals(M1).Renamed);   // said once, when it changed
+    }
+
+    [Fact]
+    public void Hold_KeepsPatient_WhenMonitorClearsItsId()
+    {
+        Info(M1, "P1");
+        _bindings.Hold(Admitted, M1, 0, Now);
+
+        var result = Info(M1, "");
+
+        Assert.Equal(Admitted, result.PatientId);
+        Assert.Equal(new ReportedIdChange("P1", ""), result.Renamed);
+        Assert.Equal(Admitted, Vitals(M1).PatientId);
+    }
+
+    [Fact]
+    public void Hold_OnMonitorNotYetHeard_BindsIt()
+    {
+        // After a restart the patients are put back before any monitor has spoken.
+        var change = _bindings.Hold(Admitted, M1, 4, Now);
+
+        Assert.Equal(new BindingChange(M1, Admitted, false, null, null, null, 4), change);
+        var monitor = _bindings.Get(M1)!;
+        Assert.Equal(Admitted, monitor.PatientId);
+        Assert.Equal(4, monitor.BedNumber);
+        Assert.Equal(Now, monitor.LastSeen);   // not "silent since the year one"
+
+        // What the monitor then says about its own patient moves nobody; what it said
+        // before the restart is not known.
+        var first = Info(M1, "P1");
+        Assert.Equal(Admitted, first.PatientId);
+        Assert.Equal(new ReportedIdChange(null, "P1"), first.Renamed);
+    }
+
+    [Fact]
+    public void Hold_OfPatientAlreadyThere_ChangesNothing()
+    {
+        _bindings.Hold(Admitted, M1, 0, Now);
+
+        Assert.Null(_bindings.Hold(Admitted, M1, 0, Now));
+    }
+
+    [Fact]
+    public void Hold_WithoutMonitor_HoldsOnceTheyAreGivenOne()
+    {
+        Info(M1, "P1");
+        Assert.Null(_bindings.Hold(Admitted, null, 0, Now));
+
+        _bindings.Transfer(Admitted, M1);
+
+        Assert.Equal(Admitted, Info(M1, "P2").PatientId);
+    }
+
+    [Fact]
+    public void Transfer_OfHeldPatient_KeepsHold()
+    {
+        Info(M1, "P1");
+        Info(M2, "P2");
+        _bindings.Hold(Admitted, M1, 0, Now);
+
+        _bindings.Transfer(Admitted, M2);
+
+        Assert.Equal(Admitted, Info(M2, "P3").PatientId);
+        Assert.Null(_bindings.Get(M1)!.PatientId);
+    }
+
+    [Fact]
+    public void Forget_EndsHold_AndMonitorsIdBindsAgain()
+    {
+        Info(M1, "P1");
+        _bindings.Hold(Admitted, M1, 0, Now);
+
+        _bindings.Forget(Admitted);
+
+        // The monitor forgot what it reported, so the patient it names is back at once ...
+        Assert.Equal("P1", Info(M1, "P1").PatientId);
+        // ... and nobody is held on it any more.
+        Assert.Equal("P2", Info(M1, "P2").PatientId);
+    }
+
+    [Fact]
+    public void Forget_EndsHold_OfPatientWithoutMonitor()
+    {
+        _bindings.Hold(Admitted, null, 0, Now);
+        _bindings.Forget(Admitted);
+
+        Info(M1, "P1");
+        _bindings.Transfer(Admitted, M1);
+
+        Assert.Equal("P2", Info(M1, "P2").PatientId);
+    }
 }

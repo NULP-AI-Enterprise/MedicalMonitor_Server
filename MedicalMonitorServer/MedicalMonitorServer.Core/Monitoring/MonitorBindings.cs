@@ -36,10 +36,19 @@ public sealed record BindingChange(
     string? PreviousMonitorIp,
     int BedNumber);
 
+/// <summary>
+/// The monitor of a held patient now reports another patient id than before. The binding did
+/// not move; the caller decides whether anybody should be told.
+/// </summary>
+/// <param name="Before">What the monitor reported until now: empty when it had no id, null when not known yet.</param>
+/// <param name="After">What it reports now; empty when it says it has no patient.</param>
+public sealed record ReportedIdChange(string? Before, string After);
+
 /// <param name="PatientId">Patient the monitor's data belongs to; null when it must be dropped.</param>
 /// <param name="DropReason">Why the data is dropped; null when <paramref name="PatientId"/> is set.</param>
 /// <param name="Change">Set when the binding changed as a result of this report.</param>
-public sealed record RouteResult(string? PatientId, string? DropReason, BindingChange? Change);
+/// <param name="Renamed">Set when the monitor changed the id it reports while its patient is held on it.</param>
+public sealed record RouteResult(string? PatientId, string? DropReason, BindingChange? Change, ReportedIdChange? Renamed = null);
 
 public enum TransferStatus
 {
@@ -58,6 +67,12 @@ public sealed record TransferResult(TransferStatus Status, BindingChange? Change
 /// a new id binds that patient here (moving them off any other monitor), and an id going
 /// empty releases the patient it named. While the reported id stays the same, a binding
 /// made by hand with <see cref="Transfer"/> holds.
+/// </para>
+/// <para>
+/// A patient a station admitted is the exception: they are held (<see cref="Hold"/>) on their
+/// monitor whatever id it reports, until the station lets them go (<see cref="Forget"/>). Their
+/// values are being recorded under their name, and a nurse who renames the patient on the
+/// monitor, or a monitor that is switched off and on, must not end that.
 /// </para>
 /// </summary>
 public interface IMonitorBindings
@@ -84,8 +99,21 @@ public interface IMonitorBindings
     TransferResult Transfer(string patientId, string monitorIp);
 
     /// <summary>
-    /// Releases a patient that left the roster. The monitor forgets what it reported, so if
-    /// it keeps sending data the patient is registered again.
+    /// Binds a patient a station admitted to a monitor and holds them there: from now on the id
+    /// the monitor reports does not move them, only <see cref="Transfer"/> and
+    /// <see cref="Forget"/> do. Whoever was on the monitor is taken off it, see the change.
+    /// </summary>
+    /// <param name="monitorIp">
+    /// The monitor, heard from already or not: after a restart the patients are put back before
+    /// any monitor has spoken. Null for a held patient who has no monitor right now.
+    /// </param>
+    /// <param name="bedNumber">Bed of a monitor that has not said its own; 0 when unknown.</param>
+    /// <returns>What changed on the monitor; null when nothing did.</returns>
+    BindingChange? Hold(string patientId, string? monitorIp, int bedNumber, DateTimeOffset now);
+
+    /// <summary>
+    /// Releases a patient that left the roster, held or not. The monitor forgets what it
+    /// reported, so if it keeps sending data the patient is registered again.
     /// </summary>
     void Forget(string patientId);
 }
@@ -105,6 +133,10 @@ public sealed class MonitorBindings : IMonitorBindings
 
     private readonly object _lock = new();
     private readonly Dictionary<string, Monitor> _monitors = new(StringComparer.Ordinal);
+
+    // Patients a station admitted. By patient, not by monitor: the hold goes with them when
+    // they are transferred, and stands while they wait for a monitor.
+    private readonly HashSet<string> _held = new(StringComparer.Ordinal);
 
     public IReadOnlyList<MonitorBindingDto> GetAll()
     {
@@ -148,13 +180,19 @@ public sealed class MonitorBindings : IMonitorBindings
             string? superseded = null, unbound = null, previousMonitor = null;
             var created = false;
             var changed = false;
+            ReportedIdChange? renamed = null;
 
             if (reportedPatientId is not null && reportedPatientId != monitor.Reported)
             {
                 var before = monitor.Reported;
                 monitor.Reported = reportedPatientId;
 
-                if (reportedPatientId.Length > 0)
+                if (monitor.PatientId is not null && _held.Contains(monitor.PatientId))
+                {
+                    // A station admitted this patient: they stay, whoever the monitor names.
+                    renamed = new ReportedIdChange(before, reportedPatientId);
+                }
+                else if (reportedPatientId.Length > 0)
                 {
                     if (monitor.PatientId != reportedPatientId)
                     {
@@ -187,7 +225,33 @@ public sealed class MonitorBindings : IMonitorBindings
 
             return monitor.PatientId is null
                 ? new RouteResult(null, DropReason(monitor), change)
-                : new RouteResult(monitor.PatientId, null, change);
+                : new RouteResult(monitor.PatientId, null, change, renamed);
+        }
+    }
+
+    public BindingChange? Hold(string patientId, string? monitorIp, int bedNumber, DateTimeOffset now)
+    {
+        lock (_lock)
+        {
+            _held.Add(patientId);
+            if (monitorIp is null) return null;
+
+            if (!_monitors.TryGetValue(monitorIp, out var monitor))
+            {
+                // Not heard from since the server started. Stamped as seen now, so that it is
+                // called silent after the usual wait and not on the first look.
+                _monitors[monitorIp] = monitor = new Monitor { Ip = monitorIp, LastSeen = now };
+            }
+
+            if (monitor.BedNumber == 0 && bedNumber > 0) monitor.BedNumber = bedNumber;
+            if (monitor.PatientId == patientId) return null;
+
+            string? superseded = null, unbound = null;
+            Detach(monitor, ref superseded, ref unbound);
+            var previousMonitor = Release(patientId);
+            monitor.PatientId = patientId;
+
+            return new BindingChange(monitor.Ip, patientId, false, superseded, unbound, previousMonitor, monitor.BedNumber);
         }
     }
 
@@ -220,6 +284,9 @@ public sealed class MonitorBindings : IMonitorBindings
     {
         lock (_lock)
         {
+            // First: a held patient who has no monitor must be let go as well.
+            _held.Remove(patientId);
+
             var monitor = MonitorOf(patientId);
             if (monitor is null) return;
 

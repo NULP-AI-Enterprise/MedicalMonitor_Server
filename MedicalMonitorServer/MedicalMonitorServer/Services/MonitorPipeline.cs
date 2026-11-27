@@ -87,8 +87,10 @@ public sealed class MonitorPipeline : IMonitorPipeline
     private readonly FeedStatus _feed;
     private readonly ILogger<MonitorPipeline> _logger;
     private readonly IPatientRecordStore _records;
+    private readonly IVitalsRecorder? _recorder;
 
     /// <param name="records">Where patient records outlive a restart; nothing is kept when omitted.</param>
+    /// <param name="recorder">Takes the values of admitted patients for the history; nothing is recorded when omitted.</param>
     public MonitorPipeline(
         IHubContext<VitalsHub> hub,
         IPatientRegistry patients,
@@ -96,7 +98,8 @@ public sealed class MonitorPipeline : IMonitorPipeline
         IMonitorBindings bindings,
         FeedStatus feed,
         ILogger<MonitorPipeline> logger,
-        IPatientRecordStore? records = null)
+        IPatientRecordStore? records = null,
+        IVitalsRecorder? recorder = null)
     {
         _hub = hub;
         _patients = patients;
@@ -105,6 +108,7 @@ public sealed class MonitorPipeline : IMonitorPipeline
         _feed = feed;
         _logger = logger;
         _records = records ?? new NoPatientRecordStore();
+        _recorder = recorder;
     }
 
     public async Task UpsertPatientAsync(PatientInfoDto patient, CancellationToken ct = default)
@@ -124,6 +128,9 @@ public sealed class MonitorPipeline : IMonitorPipeline
 
         _records.Remove(patientId);
         _bindings.Forget(patientId);
+
+        // Whoever leaves the roster is not recorded any more, whichever way they left.
+        _recorder?.Stop(patientId);
 
         foreach (var cleared in _alerts.ClearForPatient(patientId))
         {
@@ -152,14 +159,20 @@ public sealed class MonitorPipeline : IMonitorPipeline
         // A gateway knows the name and the bed; the diagnosis and the type are what a station
         // recorded, on the roster now or kept from before a restart.
         var known = _patients.Get(update.PatientId) ?? _records.Get(update.PatientId);
-        await UpsertPatientAsync(
-            new PatientInfoDto(
-                update.PatientId,
-                update.PatientName,
-                update.BedNumber,
-                known?.Diagnosis,
-                known?.PatientType ?? "Adu"),
-            ct);
+
+        // A patient a station admitted is who the station says they are: a frame that happens
+        // to carry their id brings values, not another name or bed.
+        if (known?.AdmittedAt is null)
+        {
+            await UpsertPatientAsync(
+                new PatientInfoDto(
+                    update.PatientId,
+                    update.PatientName,
+                    update.BedNumber,
+                    known?.Diagnosis,
+                    known?.PatientType ?? "Adu"),
+                ct);
+        }
 
         if (update.WaveformChannels is { Length: > 0 } channels)
         {
@@ -193,6 +206,9 @@ public sealed class MonitorPipeline : IMonitorPipeline
         var merged = complete
             ? _patients.ReplaceReadings(patientId, readings)
             : _patients.MergeReadings(patientId, readings);
+
+        // What a station is about to show is what the history keeps of this second.
+        _recorder?.Observe(patientId, merged);
 
         var update = new MonitorUpdateDto(
             patient.PatientId,

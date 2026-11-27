@@ -78,6 +78,11 @@ public sealed class JsonFilePatientRecordStore : IPatientRecordStore
     {
         if (AnonymousPatient.IsAnonymous(patient.PatientId)) return;
 
+        // A patient a station admitted is kept in the history database, with the monitor they
+        // are on, and is put back from there after a restart. Kept here as well, there would
+        // be two records of them to disagree.
+        if (patient.AdmittedAt is not null) return;
+
         lock (_lock)
         {
             if (_records.TryGetValue(patient.PatientId, out var kept) && kept == patient) return;

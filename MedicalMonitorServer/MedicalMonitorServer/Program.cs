@@ -162,6 +162,18 @@ builder.Services.AddSingleton<IPatientRecordStore>(serviceProvider =>
         Path.Combine(serviceProvider.GetRequiredService<IHostEnvironment>().ContentRootPath, path),
         serviceProvider.GetRequiredService<ILogger<JsonFilePatientRecordStore>>());
 });
+
+// The values of the patients a station admitted are recorded once a second in the SQLite file
+// "History:Path", relative to the content root, from admission to discharge. An empty path
+// records nothing, and nobody can then be admitted. A file that cannot be opened does not
+// keep the server from starting: /api/v1/health says "history": "Failing".
+builder.Services.AddSingleton<IVitalsRecorder, VitalsRecorder>();
+builder.Services.AddSingleton(serviceProvider => PatientHistory.Open(
+    serviceProvider.GetRequiredService<IConfiguration>()["History:Path"],
+    serviceProvider.GetRequiredService<IHostEnvironment>().ContentRootPath,
+    serviceProvider.GetRequiredService<IVitalsRecorder>(),
+    serviceProvider.GetRequiredService<ILogger<PatientHistory>>()));
+
 builder.Services.AddSingleton<IAlertStateService, AlertStateService>();
 builder.Services.AddSingleton<IMonitorBindings, MonitorBindings>();
 builder.Services.AddSingleton<MonitorRouter>();
@@ -172,6 +184,10 @@ builder.Services.AddSingleton<IMonitorPipeline, MonitorPipeline>();
 // A station's start and stop of a cuff measurement; the drivers refuse unless it was turned on
 // for their monitors (NihonKohden:LsNet:RemoteNibp).
 builder.Services.AddSingleton<NibpControl>();
+
+// Before the feed: it puts the admitted patients back on their monitors, and a monitor's
+// first message must find them there.
+builder.Services.AddHostedService<HistoryRecorderService>();
 builder.Services.AddHostedService<UmecFeedService>();
 builder.Services.AddHostedService<MonitorSilenceService>();
 

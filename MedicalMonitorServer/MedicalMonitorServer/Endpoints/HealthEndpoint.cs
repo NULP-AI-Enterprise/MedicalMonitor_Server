@@ -13,6 +13,7 @@ public sealed class HealthEndpoint : EndpointWithoutRequest<HealthDto>
     private readonly ConnectionTracker _connections;
     private readonly DeviceService _devices;
     private readonly FeedStatus _feed;
+    private readonly PatientHistory _history;
     private readonly TimeSpan _staleAfter;
 
     public HealthEndpoint(
@@ -20,12 +21,14 @@ public sealed class HealthEndpoint : EndpointWithoutRequest<HealthDto>
         ConnectionTracker connections,
         DeviceService devices,
         FeedStatus feed,
+        PatientHistory history,
         IConfiguration configuration)
     {
         _patients = patients;
         _connections = connections;
         _devices = devices;
         _feed = feed;
+        _history = history;
         _staleAfter = TimeSpan.FromSeconds(configuration.GetValue("Health:StaleAfterSeconds", 30));
     }
 
@@ -48,7 +51,9 @@ public sealed class HealthEndpoint : EndpointWithoutRequest<HealthDto>
             : _patients.Count > 0 && monitors == 0 ? "Unhealthy"
             : "Degraded";
 
-        var dto = new HealthDto(status, now, _patients.Count, _connections.Count, monitors, lastData, age);
+        // The history is said beside the status, not folded into it: the status is about the
+        // monitors, and a station must tell "no data" from "data, but none of it is kept".
+        var dto = new HealthDto(status, now, _patients.Count, _connections.Count, monitors, lastData, age, _history.Status);
         // Always 200: the stations poll this to tell "server reachable" apart from "monitors silent".
         return Send.OkAsync(dto, ct);
     }

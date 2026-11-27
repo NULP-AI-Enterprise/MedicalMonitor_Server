@@ -33,13 +33,89 @@ public enum WaveformType
     CentralVenousPressure,
 }
 
+/// <param name="PatientId">
+/// For a patient a station admitted: an id the server made up at admission (a UUID). For one
+/// no station has admitted: the id their monitor reports, or "ANON-..." when it reports none.
+/// </param>
+/// <param name="PatientName">Empty for an admitted patient known by <paramref name="DrAlexId"/> alone.</param>
 /// <param name="PatientType">"Adu" (adult), "Ped" (pediatric) or "Neo" (neonatal).</param>
+/// <param name="DrAlexId">
+/// What the hospital's DrAlex system calls the patient, as typed in at a station. Not checked
+/// against anything and not unique: the same person admitted twice has it twice. Null when
+/// none was given, and always for a patient no station has admitted.
+/// </param>
+/// <param name="AdmittedAt">
+/// When a station admitted the patient - this time, for somebody who was here before - which
+/// is since when their values are recorded (see /api/v1/history). Null for a patient no
+/// station has admitted: shown, but not recorded.
+/// </param>
 public record PatientInfoDto(
     string PatientId,
     string PatientName,
     int BedNumber,
     string? Diagnosis,
-    string PatientType = "Adu");
+    string PatientType = "Adu",
+    string? DrAlexId = null,
+    DateTimeOffset? AdmittedAt = null);
+
+/// <summary>
+/// A patient whose values were recorded, on a monitor now or discharged since: what
+/// GET /api/v1/history/patients lists. One patient however many times they were admitted:
+/// somebody who comes back is admitted again under the same <paramref name="PatientId"/>.
+/// </summary>
+/// <param name="PatientId">
+/// The id the server made up at the patient's first admission. Sent as existingPatientId to
+/// POST /api/v1/patients/{id}/admit, it admits them again into the history they have.
+/// </param>
+/// <param name="MonitorIp">Monitor the patient is on; null once discharged or while they have none.</param>
+/// <param name="AdmittedAt">When a station admitted the patient last: the stay that goes on, or the one that ended last.</param>
+/// <param name="DischargedAt">When a station discharged the patient and the recording ended; null while it goes on.</param>
+/// <param name="LastRecordedAt">Time of the newest recorded second; null when none was recorded.</param>
+/// <param name="Admissions">
+/// Every stay of the patient, the first one first; the last is the one <paramref name="AdmittedAt"/>
+/// and <paramref name="DischargedAt"/> are of. Nothing was recorded between two of them.
+/// </param>
+public record RecordedPatientDto(
+    string PatientId,
+    string? DrAlexId,
+    string PatientName,
+    int BedNumber,
+    string PatientType,
+    string? Diagnosis,
+    string? MonitorIp,
+    DateTimeOffset AdmittedAt,
+    DateTimeOffset? DischargedAt,
+    DateTimeOffset? LastRecordedAt,
+    IReadOnlyList<AdmissionDto> Admissions);
+
+/// <summary>One stay of a recorded patient: from a station admitting them to a station discharging them.</summary>
+/// <param name="DischargedAt">Null while the stay goes on.</param>
+/// <param name="BedNumber">The bed they were on, as last entered during the stay.</param>
+/// <param name="MonitorIp">The monitor they were on, as last known during the stay; null when it was not kept.</param>
+public record AdmissionDto(DateTimeOffset AdmittedAt, DateTimeOffset? DischargedAt, int BedNumber, string? MonitorIp);
+
+/// <summary>
+/// One recorded second of a patient: what the station showed for them then. A value that was
+/// not measured is null. While the monitor reports there is a record for every second - the
+/// odd second a once-a-second monitor skips carries what it said last - and a monitor that
+/// says nothing for more than three seconds leaves a gap.
+/// </summary>
+/// <param name="Time">The second, in UTC.</param>
+/// <param name="Nibp">
+/// A cuff reading, in the second it first appeared and in no other: a reading stands on the
+/// monitor until the next one, and repeating it every second would pass it off as measured
+/// continuously. Its <see cref="BloodPressureDto.MeasuredAt"/> is the monitor's own time of it.
+/// </param>
+/// <param name="Parameters">Every other value by <see cref="ParameterDto.Code"/> ("art.sys", "ecg.st.ii", ...); null when there was none.</param>
+public record VitalsRecordDto(
+    DateTimeOffset Time,
+    int? HeartRate,
+    int? SpO2,
+    int? PulseRate,
+    int? RespiratoryRate,
+    double? Temperature,
+    BloodPressureDto? Nibp,
+    IReadOnlyDictionary<string, double>? Parameters);
 
 /// <summary>A bedside monitor and the patient it is currently feeding.</summary>
 /// <param name="MonitorIp">IP address of the monitor; identifies it in the transfer endpoint.</param>
@@ -256,6 +332,16 @@ public record AlertDto(
     /// </summary>
     public static string BuildMonitorSilentId(string patientId) => $"{patientId}:monitor-silent";
 
+    /// <summary>
+    /// <see cref="Code"/> of the alert the server raises when the monitor of a patient a station
+    /// admitted starts naming somebody else, or says its patient was discharged: the recording
+    /// goes on under the admitted patient, and somebody has to say whether that is still right.
+    /// </summary>
+    public const int MonitorPatientChangedCode = -2;
+
+    /// <summary>Key of that alert; outside the device namespace for the same reason.</summary>
+    public static string BuildMonitorPatientChangedId(string patientId) => $"{patientId}:monitor-patient-changed";
+
     /// <summary>Severity the UI uses for a device priority: high is critical, everything else a warning.</summary>
     public static AlertSeverity SeverityOf(DeviceAlarmLevel? level) =>
         level == DeviceAlarmLevel.High ? AlertSeverity.Critical : AlertSeverity.Warning;
@@ -265,6 +351,12 @@ public record AlertDto(
 /// <param name="ConnectedMonitors">Bedside monitors (uMec devices) currently connected.</param>
 /// <param name="LastDataAt">When the last vitals reading arrived; null if none since startup.</param>
 /// <param name="DataAgeSeconds">Seconds since <paramref name="LastDataAt"/>; null if none since startup.</param>
+/// <param name="History">
+/// The recording of admitted patients' values: "Recording", "Failing" (the database cannot be
+/// opened or written - nothing is being recorded, whatever a bed says) or "Off" (not set up on
+/// this server). Null from a server that records nothing at all; a station then offers neither
+/// admission nor discharge.
+/// </param>
 public record HealthDto(
     string Status,
     DateTimeOffset Timestamp,
@@ -272,7 +364,8 @@ public record HealthDto(
     int ConnectedStations,
     int ConnectedMonitors = 0,
     DateTimeOffset? LastDataAt = null,
-    double? DataAgeSeconds = null);
+    double? DataAgeSeconds = null,
+    string? History = null);
 
 public static class VitalSignLabels
 {
